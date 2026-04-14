@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 ODOO_URL = "https://olsen-engineering.odoo.com"
 DB = "mynalios-olsen-main-7388485"
 USERNAME = "f.mordant@olsen-engineering.com"
-PASSWORD = "fmo@2022+"
+PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 
 # ---------- ODOO HELPERS ----------
 
