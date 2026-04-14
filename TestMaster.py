@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, date
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from streamlit_autorefresh import st_autorefresh
 
 # ---------- CONFIG ODOO ----------
 ODOO_URL = "https://olsen-engineering.odoo.com"
@@ -193,7 +194,8 @@ def main():
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
         return
-
+    st_autorefresh(interval=60000, key="refresh")
+    
     # --- SIDEBAR ---
     with st.sidebar:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=220)
