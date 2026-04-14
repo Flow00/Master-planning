@@ -1,3 +1,7 @@
 streamlit
 pandas
 plotly
+streamlit
+pandas
+plotly
+streamlit-autorefresh
