@@ -592,33 +592,20 @@ def main():
                         f"""
                         <div style="
                             width:100%;
+                            height:12px;
                             border-radius:6px;
-                            border:1px solid #444;
-                            padding:6px 6px 4px 6px;
+                            overflow:hidden;
+                            display:flex;
                             margin-top:4px;
-                            font-size:11px;
-                            background-color:#111;
-                            color:#eee;
+                            border:1px solid #444;
                         ">
+                            <div style="width:{pct_orange}%;background:#FFA000;"></div>
+                            <div style="width:{pct_grey}%;background:#757575;"></div>
+                            <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                            <div style="width:{pct_green}%;background:#2E7D32;"></div>
                         </div>
-
-                            <div style="
-                                width:100%;
-                                height:10px;
-                                border-radius:5px;
-                                overflow:hidden;
-                                display:flex;
-                                border:1px solid #555;
-                                margin-bottom:2px;
-                            ">
-                                <div style="width:{pct_orange}%;background:#FFA000;"></div>
-                                <div style="width:{pct_grey}%;background:#757575;"></div>
-                                <div style="width:{pct_white}%;background:#FFFFFF;"></div>
-                                <div style="width:{pct_green}%;background:#2E7D32;"></div>
-                            </div>
-                            <div style="text-align:right;font-size:10px;">
-                                {non_green} / {total}
-                            </div>
+                        <div style="text-align:right;font-size:12px;margin-top:2px;">
+                            {total} lignes
                         </div>
                         """,
                         unsafe_allow_html=True
