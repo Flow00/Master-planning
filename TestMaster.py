@@ -120,26 +120,19 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
 def clean_description_from_display_name(display_name: str) -> str:
     """
-    Nettoie les descriptions du type :
-    'SAFRAN AERO BOOSTERS SA - S24-03351 : Anneau ... - Anneau ...'
-    pour ne garder qu'une description unique.
+    Supprime uniquement la répétition finale de la description.
+    Ne touche pas au client, ni au code projet, ni aux infos utiles.
     """
-    if " : " in display_name:
-        desc_part = display_name.split(" : ", 1)[1]
-    elif " - " in display_name:
-        desc_part = display_name.split(" - ", 1)[-1]
-    else:
-        desc_part = display_name
+    if " - " not in display_name:
+        return display_name
 
-    parts = [p.strip() for p in desc_part.split(" - ") if p.strip()]
-    seen = set()
-    unique_parts = []
-    for p in parts:
-        if p not in seen:
-            seen.add(p)
-            unique_parts.append(p)
+    parts = display_name.split(" - ")
 
-    desc_clean = " - ".join(unique_parts)
+    # Si les deux derniers blocs sont identiques → on supprime le dernier
+    if len(parts) >= 2 and parts[-1].strip() == parts[-2].strip():
+        parts = parts[:-1]
+
+    desc_clean = " - ".join(parts)
     return desc_clean
 
 
