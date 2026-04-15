@@ -263,24 +263,28 @@ def get_purchase_lines(uid, models, project_name):
         }
     )
 
-    # 🔥 AJOUT : lecture des politiques de facturation
-    product_ids = list({l["product_id"][0] for l in lines if l["product_id"]})
-    if product_ids:
-        products = models.execute_kw(
-            DB, uid, PASSWORD,
-            "product.product", "read",
-            [product_ids],
-            {"fields": ["invoice_policy"]}
-        )
-        policy_map = {p["id"]: p["invoice_policy"] for p in products}
-    else:
-        policy_map = {}
+    # 🔥 Sécurisation + exclusion des produits "order"
+    filtered_lines = []
+    for l in lines:
+        pid = l.get("product_id")
+    
+        # Si pas de produit → on garde (services, notes)
+        if not pid:
+            filtered_lines.append(l)
+            continue
+    
+        product_id = pid[0]
+    
+        # Politique du produit
+        policy = policy_map.get(product_id)
+    
+        # Exclure uniquement si invoice_policy = "order"
+        if policy == "order":
+            continue
+    
+        filtered_lines.append(l)
 
-    # 🔥 AJOUT : exclusion des produits facturés sur quantités commandées
-    lines = [
-        l for l in lines
-        if policy_map.get(l["product_id"][0]) != "order"
-    ]
+    lines = filtered_lines
 
     today = date.today()
     formatted = []
