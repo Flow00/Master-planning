@@ -285,7 +285,7 @@ def purchase_tracking_tab(uid, models, projects):
             font-size:13px;
             color:black;
             display:grid;
-            grid-template-columns: 80px 120px 1fr 80px 90px 110px;
+            grid-template-columns: 80px 180px 1fr 80px 90px 110px;
             column-gap:12px;
             text-align:left;
             align-items:center;
@@ -459,7 +459,7 @@ def main():
             font-size:13px;
             color:black;
             display:grid;
-            grid-template-columns: 80px 120px 1fr 80px 90px 110px;
+            grid-template-columns: 80px 180px 1fr 80px 90px 110px;
             column-gap:12px;
             text-align:left;
             align-items:center;
