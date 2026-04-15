@@ -600,6 +600,7 @@ def main():
                             background-color:#111;
                             color:#eee;
                         ">
+                        </div>
 
                             <div style="
                                 width:100%;
