@@ -415,7 +415,7 @@ def main():
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
     with col2:
         st.markdown(
-            "<h2 style='text-align:center;margin-top:10px;'>Master Planning</h2>",
+            "<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
             unsafe_allow_html=True
         )
     with col3:
@@ -443,7 +443,7 @@ def main():
             code = p.get('name') or p['display_name']
             desc_clean = clean_description_from_display_name(p['display_name'])
             desc_short = short_desc(desc_clean, 20)
-            return f"{client} - {code} - {desc_short}"
+            return f"{client} - {desc_short}"
 
         st.subheader("📊 Gantt")
 
@@ -593,13 +593,14 @@ def main():
                     pct_green = 100 * summary["green"] / total_safe
     
                     # VIGNETTE CLIQUABLE
-                    if st.button(
-                        "",
+                    clicked = st.button(
+                        f"{client}\n{desc_short_25}",
                         key=f"proj_btn_{p['id']}",
-                        help=f"{client} - {code}"
-                    ):
+                    )
+                    
+                    if clicked:
                         st.session_state["selected_purchase_project_id"] = p['id']
-    
+                    
                     st.markdown(
                         f"""
                         <div style="
@@ -607,21 +608,20 @@ def main():
                             border-radius:8px;
                             border:1px solid #444;
                             padding:8px 10px;
-                            margin-top:-40px;
+                            margin-top:4px;
                             margin-bottom:10px;
                             font-size:12px;
                             background-color:#111;
                             color:#eee;
-                            cursor:pointer;
                         ">
                             <div style="font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
                                 {client}
                             </div>
-    
+                    
                             <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px;">
-                                {code} – {desc_short_25}
+                                {desc_short_25}
                             </div>
-    
+                    
                             <div style="
                                 width:100%;
                                 height:10px;
@@ -636,7 +636,7 @@ def main():
                                 <div style="width:{pct_white}%;background:#FFFFFF;"></div>
                                 <div style="width:{pct_green}%;background:#2E7D32;"></div>
                             </div>
-    
+                    
                             <div style="text-align:right;font-size:11px;color:{text_color};">
                                 {non_green} / {total}
                             </div>
@@ -644,6 +644,7 @@ def main():
                         """,
                         unsafe_allow_html=True
                     )
+
 
 
         st.markdown("---")
