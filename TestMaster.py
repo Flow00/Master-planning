@@ -26,7 +26,6 @@ def connect_odoo():
 
 
 def get_top_company(uid, models, partner_id):
-    """Retourne la société mère (top company) d’un contact."""
     if not partner_id:
         return "N/A"
 
@@ -116,7 +115,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
 
 # ============================================================
-# 🔧 PURCHASE TRACKING HELPERS
+# 🔧 PURCHASE TRACKING HELPERS (ULTRA RAPIDE : PAR PROJET UNIQUEMENT)
 # ============================================================
 
 def get_purchase_lines(uid, models, project_name):
@@ -176,13 +175,13 @@ def get_purchase_lines(uid, models, project_name):
             date_planned = None
 
         if qty_received >= qty_ordered:
-            color = "#C8F7C5"; rank = 3
+            color = "#2E7D32"; rank = 3          # vert vif
         elif qty_received > 0:
-            color = "#FDE3A7"; rank = 0
+            color = "#FFA000"; rank = 0          # orange vif
         elif date_planned and date_planned < today:
-            color = "#D2D7D3"; rank = 1
+            color = "#757575"; rank = 1          # gris foncé
         else:
-            color = "white"; rank = 2
+            color = "#FFFFFF"; rank = 2          # blanc
 
         po_id = l["order_id"][0]
         po_name = po_name_map.get(po_id, str(po_id))
@@ -303,7 +302,14 @@ def main():
         st.error(f"Connexion Odoo impossible : {e}")
         return
 
-    st_autorefresh(interval=60000, key="refresh")
+    # 🔁 Refresh toutes les 10 minutes
+    st_autorefresh(interval=600000, key="refresh_10min")
+
+    if "months" not in st.session_state:
+        st.session_state["months"] = 3
+
+    if "selected_purchase_project_id" not in st.session_state:
+        st.session_state["selected_purchase_project_id"] = None
 
     # ---------- BANNIÈRE ----------
     col1, col2, col3 = st.columns([1, 3, 1])
@@ -317,23 +323,16 @@ def main():
             unsafe_allow_html=True
         )
 
-    # ---------- TABS ----------
     tab1, tab2 = st.tabs(["📅 Planning", "📦 Purchases"])
 
     # ============================================================
     # 🟦 ONGLET 1 — MASTER PLANNING
     # ============================================================
     with tab1:
-
         projects = get_projects(uid, models)
         project_ids = [p['id'] for p in projects]
 
-        col_s1, col_s2 = st.columns([3, 1])
-        with col_s1:
-            months = st.slider("", 1, 6, 3)
-        with col_s2:
-            st.markdown(f"<div style='margin-top:10px;'>Projets : <b>{len(projects)}</b></div>", unsafe_allow_html=True)
-
+        months = st.session_state["months"]
         weeks = build_weeks_horizon(months)
         tasks = get_tasks(uid, models, project_ids, weeks[0][1], weeks[-1][2])
         grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
@@ -344,7 +343,8 @@ def main():
             desc = p['display_name']
             if " - " in desc:
                 desc = desc.split(" - ", 1)[1]
-            desc_short = (desc[:20] + "…") if len(desc) > 20 else desc
+            base_desc = desc
+            desc_short = base_desc if len(base_desc) <= 20 else base_desc[:20] + "…"
             return f"{client} - {code} - {desc_short}"
 
         st.subheader("📊 Gantt")
@@ -418,39 +418,50 @@ def main():
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
 
+        # Slider SOUS le Gantt
+        col_s1, col_s2 = st.columns([3, 1])
+        with col_s1:
+            new_months = st.slider("", 1, 6, months)
+        with col_s2:
+            st.markdown(f"<div style='margin-top:10px;'>Projets : <b>{len(projects)}</b></div>", unsafe_allow_html=True)
+
+        if new_months != months:
+            st.session_state["months"] = new_months
+            st.experimental_rerun()
+
+        # Recherche des tâches par projet
+        st.subheader("🔍 Tâches du projet sélectionné")
+
+        project_labels = [project_label(p) for p in projects]
+        selected_label = st.selectbox("Choisis un projet", project_labels)
+
+        selected_project = next(p for p in projects if project_label(p) == selected_label)
+        row_index = next(i for i, p in enumerate(projects) if p['id'] == selected_project['id'])
+
+        tasks_for_project = []
+        for (r, c), task_list in detailed.items():
+            if r == row_index:
+                tasks_for_project.extend(task_list)
+
+        if tasks_for_project:
+            for t in tasks_for_project:
+                st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
+        else:
+            st.info("Aucune tâche pour ce projet.")
+
     # ============================================================
-    # 🟩 ONGLET 2 — PURCHASE TRACKING
+    # 🟩 ONGLET 2 — PURCHASE TRACKING (ULTRA RAPIDE)
     # ============================================================
     with tab2:
-
         st.markdown("### 📦 Purchases par projet")
 
         projects = get_projects(uid, models)
-
-        project_purchase_map = {
-            p['id']: get_purchase_lines(uid, models, p['display_name'])
-            for p in projects
-        }
 
         cols_per_row = 5
         for i in range(0, len(projects), cols_per_row):
             cols = st.columns(cols_per_row)
             for col, p in zip(cols, projects[i:i+cols_per_row]):
                 with col:
-                    lines = project_purchase_map[p['id']]
-                    total = len(lines)
-
-                    count_orange = sum(1 for l in lines if l["Color"] == "#FDE3A7")
-                    count_grey = sum(1 for l in lines if l["Color"] == "#D2D7D3")
-                    count_white = sum(1 for l in lines if l["Color"] == "white")
-                    count_green = sum(1 for l in lines if l["Color"] == "#C8F7C5")
-
-                    total_safe = max(total, 1)
-                    pct_orange = 100 * count_orange / total_safe
-                    pct_grey = 100 * count_grey / total_safe
-                    pct_white = 100 * count_white / total_safe
-                    pct_green = 100 * count_green / total_safe
-
                     client = p["company"]
                     code = p.get('name') or p['display_name']
                     desc = p['display_name']
@@ -464,44 +475,23 @@ def main():
                     ):
                         st.session_state["selected_purchase_project_id"] = p['id']
 
-                    st.markdown(
-                        f"""
-                        <div style="
-                            width:100%;
-                            height:10px;
-                            border-radius:5px;
-                            overflow:hidden;
-                            display:flex;
-                            margin-top:4px;
-                            border:1px solid #ccc;
-                        ">
-                            <div style="width:{pct_orange}%;background:#FDE3A7;"></div>
-                            <div style="width:{pct_grey}%;background:#D2D7D3;"></div>
-                            <div style="width:{pct_white}%;background:white;"></div>
-                            <div style="width:{pct_green}%;background:#C8F7C5;"></div>
-                        </div>
-                        <div style="text-align:right;font-size:11px;margin-top:2px;">
-                            {total} lignes
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
         st.markdown("---")
         st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
 
         selected_purchase_project_id = st.session_state.get("selected_purchase_project_id", None)
         if selected_purchase_project_id is None:
-            st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
+            st.info("Clique sur une vignette projet pour charger les lignes d'achat.")
         else:
             p = next(p for p in projects if p['id'] == selected_purchase_project_id)
             st.markdown(f"**Projet sélectionné :** {p['company']} - {p.get('name') or p['display_name']}")
 
-            lines = project_purchase_map[selected_purchase_project_id]
+            # 🔥 Chargement des lignes UNIQUEMENT pour ce projet
+            lines = get_purchase_lines(uid, models, p['display_name'])
 
             if not lines:
                 st.info("Aucune ligne d'achat trouvée pour ce projet.")
             else:
+                st.markdown(f"**Total lignes : {len(lines)}**")
                 for row in lines:
                     st.markdown(
                         f"""
@@ -510,7 +500,7 @@ def main():
                             padding:6px 10px;
                             border-radius:4px;
                             margin-bottom:4px;
-                            border:1px solid #bbb;
+                            border:1px solid #555;
                             font-size:13px;
                             color:black;
                             display:grid;
