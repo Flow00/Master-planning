@@ -246,6 +246,7 @@ def get_purchase_lines(uid, models, project_name):
     buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
     po_name_map = {po["id"]: po["name"] for po in po_data}
 
+    # 🔥 AJOUT : product_id pour filtrer invoice_policy
     lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
@@ -257,9 +258,29 @@ def get_purchase_lines(uid, models, project_name):
                 "qty_received",
                 "date_planned",
                 "order_id",
+                "product_id",   # <-- important
             ]
         }
     )
+
+    # 🔥 AJOUT : lecture des politiques de facturation
+    product_ids = list({l["product_id"][0] for l in lines if l["product_id"]})
+    if product_ids:
+        products = models.execute_kw(
+            DB, uid, PASSWORD,
+            "product.product", "read",
+            [product_ids],
+            {"fields": ["invoice_policy"]}
+        )
+        policy_map = {p["id"]: p["invoice_policy"] for p in products}
+    else:
+        policy_map = {}
+
+    # 🔥 AJOUT : exclusion des produits facturés sur quantités commandées
+    lines = [
+        l for l in lines
+        if policy_map.get(l["product_id"][0]) != "order"
+    ]
 
     today = date.today()
     formatted = []
@@ -275,13 +296,13 @@ def get_purchase_lines(uid, models, project_name):
             date_planned = None
 
         if qty_received >= qty_ordered:
-            color = "#2E7D32"; rank = 3          # vert vif
+            color = "#2E7D32"; rank = 3
         elif qty_received > 0:
-            color = "#FFA000"; rank = 0          # orange vif
+            color = "#FFA000"; rank = 0
         elif date_planned and date_planned < today:
-            color = "#757575"; rank = 1          # gris foncé
+            color = "#757575"; rank = 1
         else:
-            color = "#FFFFFF"; rank = 2          # blanc
+            color = "#FFFFFF"; rank = 2
 
         po_id = l["order_id"][0]
         po_name = po_name_map.get(po_id, str(po_id))
@@ -289,7 +310,7 @@ def get_purchase_lines(uid, models, project_name):
         formatted.append({
             "PO": po_name,
             "Buyer": buyer_map.get(po_id, "Unknown"),
-            "Description": short_desc(l["name"],50),
+            "Description": short_desc(l["name"], 50),
             "Ordered": qty_ordered,
             "Received": qty_received,
             "Planned Date": date_planned,
@@ -299,6 +320,7 @@ def get_purchase_lines(uid, models, project_name):
 
     formatted.sort(key=lambda x: x["Rank"])
     return formatted
+
 
 
 # ============================================================
