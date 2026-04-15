@@ -608,7 +608,7 @@ def main():
                             border-radius:8px;
                             border:1px solid #444;
                             padding:8px 10px;
-                            margin-top:4px;
+                            margin-top:6px;
                             margin-bottom:10px;
                             font-size:12px;
                             background-color:#111;
@@ -644,6 +644,7 @@ def main():
                         """,
                         unsafe_allow_html=True
                     )
+
 
 
 
