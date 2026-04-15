@@ -115,10 +115,76 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
 
 # ============================================================
-# 🔧 PURCHASE TRACKING HELPERS (ULTRA RAPIDE : PAR PROJET UNIQUEMENT)
+# 🔧 PURCHASE HELPERS (HYBRIDE)
 # ============================================================
 
+def get_purchase_summary(uid, models, project_name):
+    """Résumé par projet : nb lignes par couleur (orange, gris, blanc, vert)."""
+    analytic_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.account", "search",
+        [[("name", "ilike", project_name)]]
+    )
+
+    if not analytic_ids:
+        return {"orange": 0, "grey": 0, "white": 0, "green": 0, "total": 0}
+
+    po_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "search",
+        [[("analytic_account_id", "in", analytic_ids)]]
+    )
+
+    if not po_ids:
+        return {"orange": 0, "grey": 0, "white": 0, "green": 0, "total": 0}
+
+    lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order.line", "search_read",
+        [[("order_id", "in", po_ids)]],
+        {
+            "fields": [
+                "product_qty",
+                "qty_received",
+                "date_planned",
+            ]
+        }
+    )
+
+    today = date.today()
+    orange = grey = white = green = 0
+
+    for l in lines:
+        qty_ordered = l["product_qty"]
+        qty_received = l["qty_received"]
+
+        if l["date_planned"]:
+            d = l["date_planned"].split(" ")[0]
+            date_planned = datetime.strptime(d, "%Y-%m-%d").date()
+        else:
+            date_planned = None
+
+        if qty_received >= qty_ordered:
+            green += 1
+        elif qty_received > 0:
+            orange += 1
+        elif date_planned and date_planned < today:
+            grey += 1
+        else:
+            white += 1
+
+    total = orange + grey + white + green
+    return {
+        "orange": orange,
+        "grey": grey,
+        "white": white,
+        "green": green,
+        "total": total
+    }
+
+
 def get_purchase_lines(uid, models, project_name):
+    """Détail complet des lignes pour le projet sélectionné."""
     analytic_ids = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.account", "search",
@@ -297,7 +363,6 @@ def main():
 
     try:
         uid, models = connect_odoo()
-        connected = True
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
         return
@@ -307,7 +372,6 @@ def main():
 
     if "months" not in st.session_state:
         st.session_state["months"] = 3
-
     if "selected_purchase_project_id" not in st.session_state:
         st.session_state["selected_purchase_project_id"] = None
 
@@ -316,7 +380,10 @@ def main():
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
     with col2:
-        st.markdown("<h2 style='text-align:center;margin-top:10px;'>Master Planning</h2>", unsafe_allow_html=True)
+        st.markdown(
+            "<h2 style='text-align:center;margin-top:10px;'>Master Planning</h2>",
+            unsafe_allow_html=True
+        )
     with col3:
         st.markdown(
             "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
@@ -384,7 +451,7 @@ def main():
                 dragmode="pan",
                 height=650,
                 margin=dict(l=20, r=20, t=40, b=20),
-                yaxis=dict(tickfont=dict(size=11))
+                yaxis=dict(tickfont=dict(size=12))
             )
 
             fig.update_layout(
@@ -423,7 +490,10 @@ def main():
         with col_s1:
             new_months = st.slider("", 1, 6, months)
         with col_s2:
-            st.markdown(f"<div style='margin-top:10px;'>Projets : <b>{len(projects)}</b></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='margin-top:10px;font-size:14px;'>Projets : <b>{len(projects)}</b></div>",
+                unsafe_allow_html=True
+            )
 
         if new_months != months:
             st.session_state["months"] = new_months
@@ -450,12 +520,17 @@ def main():
             st.info("Aucune tâche pour ce projet.")
 
     # ============================================================
-    # 🟩 ONGLET 2 — PURCHASE TRACKING (ULTRA RAPIDE)
+    # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
     # ============================================================
     with tab2:
         st.markdown("### 📦 Purchases par projet")
 
         projects = get_projects(uid, models)
+
+        # Résumés par projet (status bar) — hybride
+        summaries = {}
+        for p in projects:
+            summaries[p['id']] = get_purchase_summary(uid, models, p['display_name'])
 
         cols_per_row = 5
         for i in range(0, len(projects), cols_per_row):
@@ -469,23 +544,57 @@ def main():
                         desc = desc.split(" - ", 1)[1]
                     desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
 
+                    summary = summaries[p['id']]
+                    total = summary["total"]
+                    total_safe = max(total, 1)
+                    pct_orange = 100 * summary["orange"] / total_safe
+                    pct_grey = 100 * summary["grey"] / total_safe
+                    pct_white = 100 * summary["white"] / total_safe
+                    pct_green = 100 * summary["green"] / total_safe
+
                     if st.button(
-                        f"{client}\n{code}\n{desc_short}",
+                        f"{client}\n{code} - {desc_short}",
                         key=f"proj_btn_{p['id']}"
                     ):
                         st.session_state["selected_purchase_project_id"] = p['id']
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                            width:100%;
+                            height:12px;
+                            border-radius:6px;
+                            overflow:hidden;
+                            display:flex;
+                            margin-top:4px;
+                            border:1px solid #444;
+                        ">
+                            <div style="width:{pct_orange}%;background:#FFA000;"></div>
+                            <div style="width:{pct_grey}%;background:#757575;"></div>
+                            <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                            <div style="width:{pct_green}%;background:#2E7D32;"></div>
+                        </div>
+                        <div style="text-align:right;font-size:12px;margin-top:2px;">
+                            {total} lignes
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
         st.markdown("---")
         st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
 
         selected_purchase_project_id = st.session_state.get("selected_purchase_project_id", None)
         if selected_purchase_project_id is None:
-            st.info("Clique sur une vignette projet pour charger les lignes d'achat.")
+            st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
         else:
             p = next(p for p in projects if p['id'] == selected_purchase_project_id)
-            st.markdown(f"**Projet sélectionné :** {p['company']} - {p.get('name') or p['display_name']}")
+            st.markdown(
+                f"<div style='font-size:15px;'><b>Projet sélectionné :</b> "
+                f"{p['company']} - {p.get('name') or p['display_name']}</div>",
+                unsafe_allow_html=True
+            )
 
-            # 🔥 Chargement des lignes UNIQUEMENT pour ce projet
             lines = get_purchase_lines(uid, models, p['display_name'])
 
             if not lines:
@@ -497,17 +606,18 @@ def main():
                         f"""
                         <div style="
                             background:{row['Color']};
-                            padding:6px 10px;
+                            padding:8px 12px;
                             border-radius:4px;
-                            margin-bottom:4px;
+                            margin-bottom:5px;
                             border:1px solid #555;
-                            font-size:13px;
+                            font-size:14px;
                             color:black;
                             display:grid;
                             grid-template-columns: 90px 190px 1fr 80px 90px 110px;
                             column-gap:12px;
                             text-align:left;
                             align-items:center;
+                            line-height:1.3;
                         ">
                             <div style="white-space:nowrap;"><b>PO:</b> {row['PO']}</div>
                             <div style="white-space:nowrap;"><b>Buyer:</b> {row['Buyer']}</div>
