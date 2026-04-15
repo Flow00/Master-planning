@@ -115,6 +115,41 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
 
 # ============================================================
+# 🔧 PARSING DES NOMS / DESCRIPTIONS
+# ============================================================
+
+def clean_description_from_display_name(display_name: str) -> str:
+    """
+    Nettoie les descriptions du type :
+    'SAFRAN AERO BOOSTERS SA - S24-03351 : Anneau ... - Anneau ...'
+    pour ne garder qu'une description unique.
+    """
+    if " : " in display_name:
+        desc_part = display_name.split(" : ", 1)[1]
+    elif " - " in display_name:
+        desc_part = display_name.split(" - ", 1)[-1]
+    else:
+        desc_part = display_name
+
+    parts = [p.strip() for p in desc_part.split(" - ") if p.strip()]
+    seen = set()
+    unique_parts = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            unique_parts.append(p)
+
+    desc_clean = " - ".join(unique_parts)
+    return desc_clean
+
+
+def short_desc(desc: str, max_len: int) -> str:
+    if len(desc) <= max_len:
+        return desc
+    return desc[:max_len].rstrip() + "…"
+
+
+# ============================================================
 # 🔧 PURCHASE HELPERS (HYBRIDE)
 # ============================================================
 
@@ -132,7 +167,10 @@ def get_purchase_summary(uid, models, project_name):
     po_ids = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "search",
-        [[("analytic_account_id", "in", analytic_ids)]]
+        [[
+            ("analytic_account_id", "in", analytic_ids),
+            ("state", "=", "purchase"),  # PO confirmées uniquement
+        ]]
     )
 
     if not po_ids:
@@ -184,7 +222,7 @@ def get_purchase_summary(uid, models, project_name):
 
 
 def get_purchase_lines(uid, models, project_name):
-    """Détail complet des lignes pour le projet sélectionné."""
+    """Détail complet des lignes pour le projet sélectionné (PO confirmées)."""
     analytic_ids = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.account", "search",
@@ -197,7 +235,10 @@ def get_purchase_lines(uid, models, project_name):
     po_ids = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "search",
-        [[("analytic_account_id", "in", analytic_ids)]]
+        [[
+            ("analytic_account_id", "in", analytic_ids),
+            ("state", "=", "purchase"),
+        ]]
     )
 
     if not po_ids:
@@ -407,11 +448,8 @@ def main():
         def project_label(p):
             client = p["company"]
             code = p.get('name') or p['display_name']
-            desc = p['display_name']
-            if " - " in desc:
-                desc = desc.split(" - ", 1)[1]
-            base_desc = desc
-            desc_short = base_desc if len(base_desc) <= 20 else base_desc[:20] + "…"
+            desc_clean = clean_description_from_display_name(p['display_name'])
+            desc_short = short_desc(desc_clean, 20)
             return f"{client} - {code} - {desc_short}"
 
         st.subheader("📊 Gantt")
@@ -527,33 +565,31 @@ def main():
 
         projects = get_projects(uid, models)
 
-        # Résumés par projet (status bar) — hybride
         summaries = {}
         for p in projects:
             summaries[p['id']] = get_purchase_summary(uid, models, p['display_name'])
 
-        cols_per_row = 5
+        cols_per_row = 6
         for i in range(0, len(projects), cols_per_row):
             cols = st.columns(cols_per_row)
             for col, p in zip(cols, projects[i:i+cols_per_row]):
                 with col:
                     client = p["company"]
                     code = p.get('name') or p['display_name']
-                    desc = p['display_name']
-                    if " - " in desc:
-                        desc = desc.split(" - ", 1)[1]
-                    desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
+                    desc_clean = clean_description_from_display_name(p['display_name'])
+                    desc_short_25 = short_desc(desc_clean, 25)
 
                     summary = summaries[p['id']]
                     total = summary["total"]
                     total_safe = max(total, 1)
+                    non_green = total - summary["green"]
                     pct_orange = 100 * summary["orange"] / total_safe
                     pct_grey = 100 * summary["grey"] / total_safe
                     pct_white = 100 * summary["white"] / total_safe
                     pct_green = 100 * summary["green"] / total_safe
 
                     if st.button(
-                        f"{client}\n{code} - {desc_short}",
+                        f"{client}\n{code} – {desc_short_25}",
                         key=f"proj_btn_{p['id']}"
                     ):
                         st.session_state["selected_purchase_project_id"] = p['id']
@@ -562,20 +598,37 @@ def main():
                         f"""
                         <div style="
                             width:100%;
-                            height:12px;
                             border-radius:6px;
-                            overflow:hidden;
-                            display:flex;
-                            margin-top:4px;
                             border:1px solid #444;
+                            padding:6px 6px 4px 6px;
+                            margin-top:4px;
+                            font-size:11px;
+                            background-color:#111;
+                            color:#eee;
                         ">
-                            <div style="width:{pct_orange}%;background:#FFA000;"></div>
-                            <div style="width:{pct_grey}%;background:#757575;"></div>
-                            <div style="width:{pct_white}%;background:#FFFFFF;"></div>
-                            <div style="width:{pct_green}%;background:#2E7D32;"></div>
-                        </div>
-                        <div style="text-align:right;font-size:12px;margin-top:2px;">
-                            {total} lignes
+                            <div style="font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                                {client}
+                            </div>
+                            <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px;">
+                                {code} – {desc_short_25}
+                            </div>
+                            <div style="
+                                width:100%;
+                                height:10px;
+                                border-radius:5px;
+                                overflow:hidden;
+                                display:flex;
+                                border:1px solid #555;
+                                margin-bottom:2px;
+                            ">
+                                <div style="width:{pct_orange}%;background:#FFA000;"></div>
+                                <div style="width:{pct_grey}%;background:#757575;"></div>
+                                <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                                <div style="width:{pct_green}%;background:#2E7D32;"></div>
+                            </div>
+                            <div style="text-align:right;font-size:10px;">
+                                {non_green} / {total}
+                            </div>
                         </div>
                         """,
                         unsafe_allow_html=True
