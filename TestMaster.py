@@ -557,100 +557,100 @@ def main():
         else:
             st.info("Aucune tâche pour ce projet.")
 
-# ============================================================
-# 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
-# ============================================================
-with tab2:
-    st.markdown("### 📦 Purchases par projet")
-
-    projects = get_projects(uid, models)
-
-    # Résumés par projet (status bar) — hybride
-    summaries = {}
-    for p in projects:
-        summaries[p['id']] = get_purchase_summary(uid, models, p['display_name'])
-
-    cols_per_row = 6
-    for i in range(0, len(projects), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col, p in zip(cols, projects[i:i+cols_per_row]):
-            with col:
-
-                client = p["company"]
-                code = p.get('name') or p['display_name']
-                desc_clean = clean_description_from_display_name(p['display_name'])
-                desc_short_25 = short_desc(desc_clean, 25)
-
-                summary = summaries[p['id']]
-                total = summary["total"]
-                total_safe = max(total, 1)
-                non_green = total - summary["green"]
-
-                # Couleur du texte selon statut
-                if non_green == 0:
-                    text_color = "white"
-                elif summary["grey"] > 0:
-                    text_color = "red"
-                else:
-                    text_color = "#FFA000"  # orange vif
-
-                pct_orange = 100 * summary["orange"] / total_safe
-                pct_grey = 100 * summary["grey"] / total_safe
-                pct_white = 100 * summary["white"] / total_safe
-                pct_green = 100 * summary["green"] / total_safe
-
-                # VIGNETTE CLIQUABLE
-                if st.button(
-                    "",
-                    key=f"proj_btn_{p['id']}",
-                    help=f"{client} - {code}"
-                ):
-                    st.session_state["selected_purchase_project_id"] = p['id']
-
-                st.markdown(
-                    f"""
-                    <div style="
-                        width:100%;
-                        border-radius:8px;
-                        border:1px solid #444;
-                        padding:8px 10px;
-                        margin-top:-40px;
-                        margin-bottom:10px;
-                        font-size:12px;
-                        background-color:#111;
-                        color:#eee;
-                        cursor:pointer;
-                    ">
-                        <div style="font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                            {client}
-                        </div>
-
-                        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px;">
-                            {code} – {desc_short_25}
-                        </div>
-
+    # ============================================================
+    # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
+    # ============================================================
+    with tab2:
+        st.markdown("### 📦 Purchases par projet")
+    
+        projects = get_projects(uid, models)
+    
+        # Résumés par projet (status bar) — hybride
+        summaries = {}
+        for p in projects:
+            summaries[p['id']] = get_purchase_summary(uid, models, p['display_name'])
+    
+        cols_per_row = 6
+        for i in range(0, len(projects), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for col, p in zip(cols, projects[i:i+cols_per_row]):
+                with col:
+    
+                    client = p["company"]
+                    code = p.get('name') or p['display_name']
+                    desc_clean = clean_description_from_display_name(p['display_name'])
+                    desc_short_25 = short_desc(desc_clean, 25)
+    
+                    summary = summaries[p['id']]
+                    total = summary["total"]
+                    total_safe = max(total, 1)
+                    non_green = total - summary["green"]
+    
+                    # Couleur du texte selon statut
+                    if non_green == 0:
+                        text_color = "white"
+                    elif summary["grey"] > 0:
+                        text_color = "red"
+                    else:
+                        text_color = "#FFA000"  # orange vif
+    
+                    pct_orange = 100 * summary["orange"] / total_safe
+                    pct_grey = 100 * summary["grey"] / total_safe
+                    pct_white = 100 * summary["white"] / total_safe
+                    pct_green = 100 * summary["green"] / total_safe
+    
+                    # VIGNETTE CLIQUABLE
+                    if st.button(
+                        "",
+                        key=f"proj_btn_{p['id']}",
+                        help=f"{client} - {code}"
+                    ):
+                        st.session_state["selected_purchase_project_id"] = p['id']
+    
+                    st.markdown(
+                        f"""
                         <div style="
                             width:100%;
-                            height:10px;
-                            border-radius:5px;
-                            overflow:hidden;
-                            display:flex;
-                            border:1px solid #555;
-                            margin-bottom:4px;
+                            border-radius:8px;
+                            border:1px solid #444;
+                            padding:8px 10px;
+                            margin-top:-40px;
+                            margin-bottom:10px;
+                            font-size:12px;
+                            background-color:#111;
+                            color:#eee;
+                            cursor:pointer;
                         ">
-                            <div style="width:{pct_orange}%;background:#FFA000;"></div>
-                            <div style="width:{pct_grey}%;background:#757575;"></div>
-                            <div style="width:{pct_white}%;background:#FFFFFF;"></div>
-                            <div style="width:{pct_green}%;background:#2E7D32;"></div>
+                            <div style="font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                                {client}
+                            </div>
+    
+                            <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px;">
+                                {code} – {desc_short_25}
+                            </div>
+    
+                            <div style="
+                                width:100%;
+                                height:10px;
+                                border-radius:5px;
+                                overflow:hidden;
+                                display:flex;
+                                border:1px solid #555;
+                                margin-bottom:4px;
+                            ">
+                                <div style="width:{pct_orange}%;background:#FFA000;"></div>
+                                <div style="width:{pct_grey}%;background:#757575;"></div>
+                                <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                                <div style="width:{pct_green}%;background:#2E7D32;"></div>
+                            </div>
+    
+                            <div style="text-align:right;font-size:11px;color:{text_color};">
+                                {non_green} / {total}
+                            </div>
                         </div>
-
-                        <div style="text-align:right;font-size:11px;color:{text_color};">
-                            {non_green} / {total}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                        """,
+                        unsafe_allow_html=True
+                    )
 
 
         st.markdown("---")
