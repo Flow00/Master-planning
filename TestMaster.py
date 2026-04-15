@@ -612,7 +612,7 @@ def main():
                             <div style="width:{pct_green}%;background:#2E7D32;"></div>
                         </div>
                         <div style="text-align:right;font-size:12px;color:{text_color};margin-top:2px;">
-                            {non_green} / {total} lignes
+                            {summary["green"]} / {total} lignes
                         </div>
                         """,
                         unsafe_allow_html=True
