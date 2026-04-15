@@ -41,7 +41,6 @@ def get_projects(uid, models):
     projects = models.execute_kw(DB, uid, PASSWORD,
         'project.project', 'search_read', [domain], {'fields': fields})
 
-    # ---- OPTIMISATION ----
     project_ids = [p["id"] for p in projects]
 
     updates = models.execute_kw(
@@ -67,10 +66,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
     domain = [
         ('project_id', 'in', project_ids),
-        #('stage_id.name', '!=', 'terminée'),
         ('date_deadline', '!=', False),
-        #('date_deadline', '>=', start_date.strftime('%Y-%m-%d')),
-        #('date_deadline', '<=', end_date.strftime('%Y-%m-%d')),
         ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)']),
     ]
 
@@ -88,6 +84,87 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     return tasks
 
 
+# ---------- PURCHASE TRACKING HELPERS ----------
+
+def get_purchase_lines(uid, models, project_name):
+    """Retourne toutes les lignes d'achat liées au compte analytique contenant le nom du projet."""
+
+    analytic_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.account", "search",
+        [[("name", "ilike", project_name)]]
+    )
+
+    if not analytic_ids:
+        return []
+
+    po_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "search",
+        [[("analytic_account_id", "in", analytic_ids)]]
+    )
+
+    if not po_ids:
+        return []
+
+    po_data = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "read",
+        [po_ids],
+        {"fields": ["id", "user_id"]}
+    )
+    buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
+
+    lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order.line", "search_read",
+        [[("order_id", "in", po_ids)]],
+        {
+            "fields": [
+                "name",
+                "product_qty",
+                "qty_received",
+                "date_planned",
+                "order_id",
+            ]
+        }
+    )
+
+    today = date.today()
+    formatted = []
+
+    for l in lines:
+        qty_ordered = l["product_qty"]
+        qty_received = l["qty_received"]
+
+        if l["date_planned"]:
+            d = l["date_planned"].split(" ")[0]
+            date_planned = datetime.strptime(d, "%Y-%m-%d").date()
+        else:
+            date_planned = None
+
+        if qty_received >= qty_ordered:
+            color = "#C8F7C5"
+        elif qty_received > 0:
+            color = "#FDE3A7"
+        elif date_planned and date_planned < today:
+            color = "#D2D7D3"
+        else:
+            color = "white"
+
+        formatted.append({
+            "PO": l["order_id"][0],
+            "Buyer": buyer_map.get(l["order_id"][0], "Unknown"),
+            "Description": l["name"],
+            "Ordered": qty_ordered,
+            "Received": qty_received,
+            "Planned Date": date_planned,
+            "Color": color
+        })
+
+    return formatted
+
+
 # ---------- HORIZON & MAPPING ----------
 
 def build_weeks_horizon(months=3):
@@ -100,8 +177,6 @@ def build_weeks_horizon(months=3):
         current += timedelta(days=7)
     return weeks
 
-
-# --- LÉGENDE UNIFORMISÉE ---
 
 COLOR_ORDER = [
     "Soudure",
@@ -178,6 +253,48 @@ def color_from_cell(colors):
     return "#9C27B0"
 
 
+# ---------- PURCHASE TRACKING TAB ----------
+
+def purchase_tracking_tab(uid, models, projects):
+    st.header("📦 Purchase Tracking")
+
+    project_names = [p["display_name"] for p in projects]
+
+    selected = st.selectbox("Sélectionne un projet :", project_names)
+
+    if not selected:
+        return
+
+    st.write("---")
+
+    lines = get_purchase_lines(uid, models, selected)
+
+    if not lines:
+        st.info("Aucune ligne d'achat trouvée pour ce projet.")
+        return
+
+    for row in lines:
+        st.markdown(
+            f"""
+            <div style="
+                background:{row['Color']};
+                padding:10px;
+                border-radius:5px;
+                margin-bottom:5px;
+                border:1px solid #ccc;
+            ">
+                <b>PO:</b> {row['PO']}<br>
+                <b>Buyer:</b> {row['Buyer']}<br>
+                <b>Description:</b> {row['Description']}<br>
+                <b>Ordered:</b> {row['Ordered']} — 
+                <b>Received:</b> {row['Received']}<br>
+                <b>Planned Date:</b> {row['Planned Date']}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
 # ---------- STREAMLIT APP ----------
 
 def main():
@@ -194,8 +311,9 @@ def main():
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
         return
+
     st_autorefresh(interval=60000, key="refresh")
-    
+
     # --- SIDEBAR ---
     with st.sidebar:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=220)
@@ -221,158 +339,152 @@ def main():
         projects = get_projects(uid, models)
         st.write(f"**Projets chargés :** {len(projects)}")
 
-    st.title("📅 Master Planning Odoo")
+    # ---------------- TABS ----------------
+    tab1, tab2 = st.tabs(["📅 Master Planning", "📦 Purchase Tracking"])
 
-    # --- DATA ---
-    project_ids = [p['id'] for p in projects]
+    # ---------------- TAB 1 ----------------
+    with tab1:
+        st.title("📅 Master Planning Odoo")
 
-    weeks = build_weeks_horizon(months)
-    tasks = get_tasks(uid, models, project_ids, weeks[0][1], weeks[-1][2])
-    grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
+        project_ids = [p['id'] for p in projects]
 
-    col_labels = [f"S{w[0]}\n{w[1].strftime('%d/%m')}" for w in weeks]
+        weeks = build_weeks_horizon(months)
+        tasks = get_tasks(uid, models, project_ids, weeks[0][1], weeks[-1][2])
+        grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
 
-    # --- GANTT ---
-    st.subheader("📊 Gantt")
+        col_labels = [f"S{w[0]}\n{w[1].strftime('%d/%m')}" for w in weeks]
 
-    gantt_data = []
-    for t in tasks:
-        gantt_data.append({
-            "Tâche": t["name"],
-            "Projet": next(p['display_name'] for p in projects if p['id'] == t['project_id'][0]),
-            "Début": t["date_deadline"] - timedelta(days=3),
-            "Fin": t["date_deadline"] + timedelta(days=3),
-            "Type": classify_task_type(t["name"])
-        })
+        # --- GANTT ---
+        st.subheader("📊 Gantt")
 
-    df_gantt = pd.DataFrame(gantt_data)
+        gantt_data = []
+        for t in tasks:
+            gantt_data.append({
+                "Tâche": t["name"],
+                "Projet": next(p['display_name'] for p in projects if p['id'] == t['project_id'][0]),
+                "Début": t["date_deadline"] - timedelta(days=3),
+                "Fin": t["date_deadline"] + timedelta(days=3),
+                "Type": classify_task_type(t["name"])
+            })
 
-    df_gantt["Type détaillé"] = pd.Categorical(
-        df_gantt["Type"],
-        categories=COLOR_ORDER,
-        ordered=True
-    )
+        df_gantt = pd.DataFrame(gantt_data)
 
-    fig = px.timeline(
-        df_gantt,
-        x_start="Début",
-        x_end="Fin",
-        y="Projet",
-        color="Type détaillé",
-        color_discrete_map=COLOR_MAP
-    )
+        df_gantt["Type détaillé"] = pd.Categorical(
+            df_gantt["Type"],
+            categories=COLOR_ORDER,
+            ordered=True
+        )
 
-    fig.update_yaxes(autorange="reversed")
+        fig = px.timeline(
+            df_gantt,
+            x_start="Début",
+            x_end="Fin",
+            y="Projet",
+            color="Type détaillé",
+            color_discrete_map=COLOR_MAP
+        )
 
-    # Mode pan par défaut
-    fig.update_layout(
-        dragmode="pan",
-        height=600,
-        margin=dict(l=20, r=20, t=20, b=20),
-        yaxis=dict(tickfont=dict(size=10))
-    )
-    
-    fig.update_layout(showlegend=False)
-    
-    # 👉 Vue centrée sur aujourd’hui, dépendante du slider "months"
-    today = date.today()
-    start_view = today 
-    end_view = today + timedelta(days=30 * months)
+        fig.update_yaxes(autorange="reversed")
 
-    fig.update_xaxes(range=[start_view, end_view])
+        fig.update_layout(
+            dragmode="pan",
+            height=600,
+            margin=dict(l=20, r=20, t=20, b=20),
+            yaxis=dict(tickfont=dict(size=10))
+        )
+        
+        fig.update_layout(showlegend=False)
+        
+        today = date.today()
+        start_view = today 
+        end_view = today + timedelta(days=30 * months)
 
-    # Bouton plein écran
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={"displaylogo": False, "modeBarButtonsToRemove": []}
-    )
+        fig.update_xaxes(range=[start_view, end_view])
 
-    # --- PLANNING ---
-    st.subheader("📅 Planning")
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"displaylogo": False, "modeBarButtonsToRemove": []}
+        )
 
-    data = []
-    for row, p in enumerate(projects):
-        row_vals = []
-        for col in range(len(weeks)):
-            colors = grid.get((row, col), [])
-            row_vals.append(len(colors))
-        data.append(row_vals)
+        # --- PLANNING ---
+        st.subheader("📅 Planning")
 
-    df = pd.DataFrame(data, index=[p['display_name'] for p in projects], columns=col_labels)
+        data = []
+        for row, p in enumerate(projects):
+            row_vals = []
+            for col in range(len(weeks)):
+                colors = grid.get((row, col), [])
+                row_vals.append(len(colors))
+            data.append(row_vals)
 
-    styled = df.style.apply(
-        lambda _: pd.DataFrame(
-            [[f"background-color: {color_from_cell(grid.get((r, c), []))}"
-              for c in range(len(weeks))]
-             for r in range(len(projects))],
-            index=df.index, columns=df.columns
-        ),
-        axis=None
-    )
+        df = pd.DataFrame(data, index=[p['display_name'] for p in projects], columns=col_labels)
 
-    st.dataframe(styled, use_container_width=True)
+        styled = df.style.apply(
+            lambda _: pd.DataFrame(
+                [[f"background-color: {color_from_cell(grid.get((r, c), []))}"
+                  for c in range(len(weeks))]
+                 for r in range(len(projects))],
+                index=df.index, columns=df.columns
+            ),
+            axis=None
+        )
 
-    # --- CSS COMPACT ---
-    st.markdown("""
-    <style>
+        st.dataframe(styled, use_container_width=True)
 
-    div[data-testid="stDataFrame"] table {
-        margin-right: 140px !important;
-    }
+        # --- SELECTBOX POUR LES TÂCHES ---
+        st.subheader("🔍 Tâches du projet sélectionné")
 
-    div[data-testid="stDataFrame"] table tbody th {
-        max-width: 150px !important;
-        width: 150px !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
-        white-space: nowrap !important;
-    }
+        selected_project = st.selectbox(
+            "Choisis un projet",
+            [p['display_name'] for p in projects]
+        )
 
-    div[data-testid="stDataFrame"] table tbody td:nth-child(2),
-    div[data-testid="stDataFrame"] table thead th:nth-child(2) {
-        max-width: 55px !important;
-        width: 55px !important;
-    }
+        row = next(i for i, p in enumerate(projects) if p['display_name'] == selected_project)
 
-    div[data-testid="stDataFrame"] table tbody td:nth-child(n+3),
-    div[data-testid="stDataFrame"] table thead th:nth-child(n+3) {
-        max-width: 32px !important;
-        width: 32px !important;
-        padding-left: 1px !important;
-        padding-right: 1px !important;
-    }
+        tasks_for_project = []
+        for (r, c), task_list in detailed.items():
+            if r == row:
+                tasks_for_project.extend(task_list)
 
-    div[data-testid="stDataFrame"] table tbody tr td,
-    div[data-testid="stDataFrame"] table tbody tr th {
-        padding-top: 2px !important;
-        padding-bottom: 2px !important;
-        height: 10px !important;
-    }
+        if tasks_for_project:
+            for t in tasks_for_project:
+                st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
+        else:
+            st.info("Aucune tâche pour ce projet.")
 
-    </style>
-    """, unsafe_allow_html=True)
+        # ---------------- PURCHASE LINES UNDER TASKS ----------------
+        st.subheader("📦 Lignes d'achat liées à ce projet")
 
-    # --- SELECTBOX POUR LES TÂCHES ---
-    st.subheader("🔍 Tâches du projet sélectionné")
+        purchase_lines = get_purchase_lines(uid, models, selected_project)
 
-    selected_project = st.selectbox(
-        "Choisis un projet",
-        [p['display_name'] for p in projects]
-    )
+        if not purchase_lines:
+            st.info("Aucune ligne d'achat trouvée.")
+        else:
+            for row in purchase_lines:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{row['Color']};
+                        padding:10px;
+                        border-radius:5px;
+                        margin-bottom:5px;
+                        border:1px solid #ccc;
+                    ">
+                        <b>PO:</b> {row['PO']}<br>
+                        <b>Buyer:</b> {row['Buyer']}<br>
+                        <b>Description:</b> {row['Description']}<br>
+                        <b>Ordered:</b> {row['Ordered']} — 
+                        <b>Received:</b> {row['Received']}<br>
+                        <b>Planned Date:</b> {row['Planned Date']}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-    row = next(i for i, p in enumerate(projects) if p['display_name'] == selected_project)
-
-    tasks_for_project = []
-    for (r, c), task_list in detailed.items():
-        if r == row:
-            tasks_for_project.extend(task_list)
-
-    if tasks_for_project:
-        for t in tasks_for_project:
-            st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
-    else:
-        st.info("Aucune tâche pour ce projet.")
+    # ---------------- TAB 2 ----------------
+    with tab2:
+        purchase_tracking_tab(uid, models, projects)
 
     # --- FOOTER ---
     st.markdown("""
