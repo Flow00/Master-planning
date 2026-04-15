@@ -289,7 +289,7 @@ def get_purchase_lines(uid, models, project_name):
         formatted.append({
             "PO": po_name,
             "Buyer": buyer_map.get(po_id, "Unknown"),
-            "Description": short_desc(l["name"],30),
+            "Description": short_desc(l["name"],50),
             "Ordered": qty_ordered,
             "Received": qty_received,
             "Planned Date": date_planned,
