@@ -278,17 +278,21 @@ def purchase_tracking_tab(uid, models, projects):
             f"""
             <div style="
                 background:{row['Color']};
-                padding:10px;
-                border-radius:5px;
-                margin-bottom:5px;
-                border:1px solid #ccc;
+                padding:6px 10px;
+                border-radius:4px;
+                margin-bottom:4px;
+                border:1px solid #bbb;
+                font-size:13px;
+                color:black;
+                display:flex;
+                justify-content:space-between;
             ">
-                <b>PO:</b> {row['PO']}<br>
-                <b>Buyer:</b> {row['Buyer']}<br>
-                <b>Description:</b> {row['Description']}<br>
-                <b>Ordered:</b> {row['Ordered']} — 
-                <b>Received:</b> {row['Received']}<br>
-                <b>Planned Date:</b> {row['Planned Date']}
+                <div><b>PO:</b> {row['PO']}</div>
+                <div><b>Buyer:</b> {row['Buyer']}</div>
+                <div><b>Description:</b> {row['Description']}</div>
+                <div><b>Ordered:</b> {row['Ordered']}</div>
+                <div><b>Received:</b> {row['Received']}</div>
+                <div><b>Date:</b> {row['Planned Date']}</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -407,30 +411,9 @@ def main():
             config={"displaylogo": False, "modeBarButtonsToRemove": []}
         )
 
-        # --- PLANNING ---
-        st.subheader("📅 Planning")
-
-        data = []
-        for row, p in enumerate(projects):
-            row_vals = []
-            for col in range(len(weeks)):
-                colors = grid.get((row, col), [])
-                row_vals.append(len(colors))
-            data.append(row_vals)
-
-        df = pd.DataFrame(data, index=[p['display_name'] for p in projects], columns=col_labels)
-
-        styled = df.style.apply(
-            lambda _: pd.DataFrame(
-                [[f"background-color: {color_from_cell(grid.get((r, c), []))}"
-                  for c in range(len(weeks))]
-                 for r in range(len(projects))],
-                index=df.index, columns=df.columns
-            ),
-            axis=None
-        )
-
-        st.dataframe(styled, use_container_width=True)
+        # --- PLANNING (désactivé comme demandé) ---
+        # st.subheader("📅 Planning")
+        # st.dataframe(styled, use_container_width=True)
 
         # --- SELECTBOX POUR LES TÂCHES ---
         st.subheader("🔍 Tâches du projet sélectionné")
@@ -466,17 +449,21 @@ def main():
                     f"""
                     <div style="
                         background:{row['Color']};
-                        padding:10px;
-                        border-radius:5px;
-                        margin-bottom:5px;
-                        border:1px solid #ccc;
+                        padding:6px 10px;
+                        border-radius:4px;
+                        margin-bottom:4px;
+                        border:1px solid #bbb;
+                        font-size:13px;
+                        color:black;
+                        display:flex;
+                        justify-content:space-between;
                     ">
-                        <b>PO:</b> {row['PO']}<br>
-                        <b>Buyer:</b> {row['Buyer']}<br>
-                        <b>Description:</b> {row['Description']}<br>
-                        <b>Ordered:</b> {row['Ordered']} — 
-                        <b>Received:</b> {row['Received']}<br>
-                        <b>Planned Date:</b> {row['Planned Date']}
+                        <div><b>PO:</b> {row['PO']}</div>
+                        <div><b>Buyer:</b> {row['Buyer']}</div>
+                        <div><b>Description:</b> {row['Description']}</div>
+                        <div><b>Ordered:</b> {row['Ordered']}</div>
+                        <div><b>Received:</b> {row['Received']}</div>
+                        <div><b>Date:</b> {row['Planned Date']}</div>
                     </div>
                     """,
                     unsafe_allow_html=True
