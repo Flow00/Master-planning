@@ -583,7 +583,7 @@ def main():
                     pct_green = 100 * summary["green"] / total_safe
 
                     if st.button(
-                        f"{client}\n{code} – {desc_short_25}",
+                        f"{client}\n {desc_short_25}",
                         key=f"proj_btn_{p['id']}"
                     ):
                         st.session_state["selected_purchase_project_id"] = p['id']
@@ -600,12 +600,7 @@ def main():
                             background-color:#111;
                             color:#eee;
                         ">
-                            <div style="font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                                {client}
-                            </div>
-                            <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px;">
-                                {desc_short_25}
-                            </div>
+
                             <div style="
                                 width:100%;
                                 height:10px;
