@@ -582,6 +582,13 @@ def main():
                     pct_white = 100 * summary["white"] / total_safe
                     pct_green = 100 * summary["green"] / total_safe
 
+                    if non_green == 0:
+                        text_color = "white"
+                    elif summary["grey"] > 0:
+                        text_color = "red"
+                    else:
+                        text_color = "#FFA000"
+    
                     if st.button(
                         f"{client}\n {desc_short_25}",
                         key=f"proj_btn_{p['id']}"
@@ -604,8 +611,8 @@ def main():
                             <div style="width:{pct_white}%;background:#FFFFFF;"></div>
                             <div style="width:{pct_green}%;background:#2E7D32;"></div>
                         </div>
-                        <div style="text-align:right;font-size:12px;margin-top:2px;">
-                            {total} lignes
+                        <div style="text-align:right;font-size:12px;color:{text_color};margin-top:2px;">
+                            {non_green} / {total} lignes
                         </div>
                         """,
                         unsafe_allow_html=True
