@@ -276,19 +276,20 @@ def purchase_tracking_tab(uid, models, projects):
     for row in lines:
         st.markdown(
             f"""
-            <div style="
-                background:{row['Color']};
-                padding:6px 10px;
-                border-radius:4px;
-                margin-bottom:4px;
-                border:1px solid #bbb;
-                font-size:13px;
-                color:black;
-                display:flex;
-                justify-content:flex-start;
-                text-align:left;
-                gap:20px;
-                ">
+        <div style="
+            background:{row['Color']};
+            padding:6px 10px;
+            border-radius:4px;
+            margin-bottom:4px;
+            border:1px solid #bbb;
+            font-size:13px;
+            color:black;
+            display:grid;
+            grid-template-columns: 80px 120px 1fr 80px 90px 110px;
+            column-gap:12px;
+            text-align:left;
+            align-items:center;
+        ">
                 <div><b>PO:</b> {row['PO']}</div>
                 <div><b>Buyer:</b> {row['Buyer']}</div>
                 <div><b>Description:</b> {row['Description']}</div>
@@ -318,7 +319,7 @@ def main():
         st.error(f"Connexion Odoo impossible : {e}")
         return
 
-    st_autorefresh(interval=60000, key="refresh")
+    st_autorefresh(interval=300000, key="refresh")
 
     # --- SIDEBAR ---
     with st.sidebar:
@@ -449,19 +450,20 @@ def main():
             for row in purchase_lines:
                 st.markdown(
                     f"""
-                    <div style="
-                        background:{row['Color']};
-                        padding:6px 10px;
-                        border-radius:4px;
-                        margin-bottom:4px;
-                        border:1px solid #bbb;
-                        font-size:13px;
-                        color:black;
-                        display:flex;
-                        justify-content:flex-start;
-                        text-align:left;
-                        gap:20px;
-                          ">
+        <div style="
+            background:{row['Color']};
+            padding:6px 10px;
+            border-radius:4px;
+            margin-bottom:4px;
+            border:1px solid #bbb;
+            font-size:13px;
+            color:black;
+            display:grid;
+            grid-template-columns: 80px 120px 1fr 80px 90px 110px;
+            column-gap:12px;
+            text-align:left;
+            align-items:center;
+        ">
                         <div><b>PO:</b> {row['PO']}</div>
                         <div><b>Buyer:</b> {row['Buyer']}</div>
                         <div><b>Description:</b> {row['Description']}</div>
