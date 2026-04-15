@@ -458,8 +458,10 @@ def main():
                         font-size:13px;
                         color:black;
                         display:flex;
-                        justify-content:space-between;
-                    ">
+                        justify-content:flex-start;
+                        text-align:left;
+                        gap:20px;
+                          ">
                         <div><b>PO:</b> {row['PO']}</div>
                         <div><b>Buyer:</b> {row['Buyer']}</div>
                         <div><b>Description:</b> {row['Description']}</div>
