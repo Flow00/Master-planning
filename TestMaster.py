@@ -16,6 +16,10 @@ PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 # 🔧 ODOO HELPERS
 # ============================================================
 
+@st.cache_data(ttl=300)
+def load_purchase_data(project_name):
+    uid, models = connect_odoo()
+    
 def connect_odoo():
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
@@ -460,13 +464,18 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
-
+        
             df_gantt["Type détaillé"] = pd.Categorical(
                 df_gantt["Type"],
                 categories=COLOR_ORDER,
                 ordered=True
             )
-
+        
+            # 🔥 1) Appliquer le filtre si un projet est sélectionné
+            current_filter = st.session_state.get("gantt_filter", None)
+            if current_filter:
+                df_gantt = df_gantt[df_gantt["Projet"] == current_filter]
+        
             fig = px.timeline(
                 df_gantt,
                 x_start="Début",
@@ -475,16 +484,16 @@ def main():
                 color="Type détaillé",
                 color_discrete_map=COLOR_MAP
             )
-
+        
             fig.update_yaxes(autorange="reversed")
-
+        
             fig.update_layout(
                 dragmode="pan",
                 height=650,
                 margin=dict(l=20, r=20, t=40, b=20),
                 yaxis=dict(tickfont=dict(size=12))
             )
-
+        
             fig.update_layout(
                 legend=dict(
                     orientation="h",
@@ -495,7 +504,7 @@ def main():
                     font=dict(size=10)
                 )
             )
-
+        
             today = date.today()
             fig.add_vline(
                 x=today,
@@ -503,18 +512,38 @@ def main():
                 line_color="white",
                 opacity=0.9
             )
-
+        
             start_view = today
             end_view = today + timedelta(days=30 * months)
             fig.update_xaxes(range=[start_view, end_view])
-
-            st.plotly_chart(
+        
+            # 🔥 2) REMPLACE st.plotly_chart PAR plotly_events
+            clicked = plotly_events(
                 fig,
-                use_container_width=True,
-                config={"displaylogo": False}
+                click_event=True,
+                hover_event=False,
+                select_event=False,
+                override_height=650,
+                override_width="100%"
             )
+        
+            # 🔥 3) Gestion du toggle
+            if clicked:
+                proj_clicked = clicked[0]["y"]
+                if st.session_state.get("gantt_filter") == proj_clicked:
+                    st.session_state["gantt_filter"] = None
+                else:
+                    st.session_state["gantt_filter"] = proj_clicked
+        
+            # 🔥 4) Affichage état du filtre
+            if st.session_state.get("gantt_filter"):
+                st.markdown(f"**Projet filtré :** {st.session_state['gantt_filter']}")
+            else:
+                st.markdown("**Vue : Tous les projets**")
+        
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
+
 
         # Slider SOUS le Gantt
         col_s1, col_s2 = st.columns([3, 1])
@@ -532,23 +561,21 @@ def main():
 
         # Recherche des tâches par projet
         st.subheader("🔍 Tâches du projet sélectionné")
-
-        project_labels = [project_label(p) for p in projects]
-        selected_label = st.selectbox("Choisis un projet", project_labels)
-
-        selected_project = next(p for p in projects if project_label(p) == selected_label)
-        row_index = next(i for i, p in enumerate(projects) if p['id'] == selected_project['id'])
-
-        tasks_for_project = []
-        for (r, c), task_list in detailed.items():
-            if r == row_index:
-                tasks_for_project.extend(task_list)
-
-        if tasks_for_project:
-            for t in tasks_for_project:
-                st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
+        
+        if st.session_state.get("gantt_filter"):
+            proj_label = st.session_state["gantt_filter"]
+            proj = next(p for p in projects if project_label(p) == proj_label)
+            proj_id = proj["id"]
+        
+            tasks_for_project = [t for t in tasks if t["project_id"][0] == proj_id]
+        
+            if tasks_for_project:
+                for t in tasks_for_project:
+                    st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
+            else:
+                st.info("Aucune tâche pour ce projet.")
         else:
-            st.info("Aucune tâche pour ce projet.")
+            st.info("Clique sur une barre du Gantt pour filtrer un projet.")
 
     # ============================================================
     # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
