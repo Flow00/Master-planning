@@ -98,7 +98,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # Charger toutes les lignes d'achat
+    # Charger toutes les lignes d'achat avec analytic_account_id
     po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
@@ -106,7 +106,7 @@ def load_purchase_data_all_projects():
         {"fields": [
             "name", "product_qty", "qty_received",
             "date_planned", "order_id", "product_id",
-            "analytic_distribution"
+            "analytic_account_id"
         ]}
     )
 
@@ -135,20 +135,26 @@ def load_purchase_data_all_projects():
 
     return po_lines, policy_map, buyer_map, po_name_map
 
-def get_purchase_for_project(project_name, po_lines, policy_map, buyer_map, po_name_map):
+
+def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
     today = date.today()
     orange = grey = white = green = 0
     formatted = []
 
+    # ID analytique du projet
+    analytic_id = project["partner_id"][0] if project.get("partner_id") else None
+
     for l in po_lines:
-        dist = l.get("analytic_distribution") or {}
-        if not any(project_name.lower() in k.lower() for k in dist.keys()):
+        # Vérifier si la ligne appartient au projet
+        if l.get("analytic_account_id") != analytic_id:
             continue
 
-        pid = l.get("product_id")
-        if not pid or policy_map.get(pid[0]) != "delivery":
-            continue
+        # Filtre invoice_policy == delivery
+        #pid = l.get("product_id")
+        #if not pid or policy_map.get(pid[0]) != "delivery":
+        #    continue
 
+        # Exclure Ordered = 0
         if l["product_qty"] == 0:
             continue
 
@@ -194,6 +200,7 @@ def get_purchase_for_project(project_name, po_lines, policy_map, buyer_map, po_n
     }
 
     return summary, formatted
+
 
 
 
