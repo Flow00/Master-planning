@@ -109,7 +109,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # 1️⃣ Charger tous les PO avec analytic_account_id
+    # 1) Charger tous les PO avec analytic_account_id
     po_data = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "search_read",
@@ -131,7 +131,7 @@ def load_purchase_data_all_projects():
 
     po_ids = list(po_to_analytic.keys())
 
-    # 2️⃣ Charger toutes les lignes d'achat
+    # 2) Charger toutes les lignes d'achat
     po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
@@ -142,11 +142,11 @@ def load_purchase_data_all_projects():
         ]}
     )
 
-    # Ajouter analytic_id à chaque ligne
+    # Ajouter analytic_id à chaque ligne (hérité du PO)
     for l in po_lines:
         l["analytic_id"] = po_to_analytic.get(l["order_id"][0])
 
-    # 3️⃣ Charger invoice_policy
+    # 3) Charger invoice_policy
     product_ids = list({l["product_id"][0] for l in po_lines if l.get("product_id")})
     policy_map = {}
     if product_ids:
@@ -166,25 +166,21 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     orange = grey = white = green = 0
     formatted = []
 
-    # 🔥 Extraire le code projet (ex: S25-00442)
-    project_code = extract_project_code(project["display_name"])
+    # 🔥 Récupérer l'analytic_account_id du projet
+    analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
 
-    if not project_code:
+    if not analytic_id:
         return {"orange":0,"grey":0,"white":0,"green":0,"total":0}, []
 
     for l in po_lines:
-
-        # 🔥 Filtrer via analytic_distribution
-        dist = l.get("analytic_distribution") or {}
-        if not any(project_code in key for key in dist.keys()):
+        # 🔥 Filtrer via analytic_id hérité du PO
+        if l["analytic_id"] != analytic_id:
             continue
 
-        # Filtre invoice_policy == delivery
         pid = l.get("product_id")
         if not pid or policy_map.get(pid[0]) != "delivery":
             continue
 
-        # Exclure Ordered = 0
         if l["product_qty"] == 0:
             continue
 
@@ -230,6 +226,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     }
 
     return summary, formatted
+
 
 
 
