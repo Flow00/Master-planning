@@ -98,19 +98,45 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # Charger toutes les lignes d'achat avec analytic_account_id
+    # 1) Charger tous les PO avec analytic_account_id
+    po_data = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "search_read",
+        [[("state", "=", "purchase")]],
+        {"fields": ["id", "analytic_account_id", "user_id", "name"]}
+    )
+
+    # Mapping PO → analytic account
+    po_to_analytic = {
+        po["id"]: (po["analytic_account_id"][0] if po["analytic_account_id"] else None)
+        for po in po_data
+    }
+
+    buyer_map = {
+        po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown")
+        for po in po_data
+    }
+
+    po_name_map = {po["id"]: po["name"] for po in po_data}
+
+    po_ids = list(po_to_analytic.keys())
+
+    # 2) Charger toutes les lignes d'achat
     po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
-        [[("state", "=", "purchase")]],
+        [[("order_id", "in", po_ids)]],
         {"fields": [
             "name", "product_qty", "qty_received",
-            "date_planned", "order_id", "product_id",
-            "analytic_account_id"
+            "date_planned", "order_id", "product_id"
         ]}
     )
 
-    # Charger invoice_policy
+    # Ajouter analytic_id à chaque ligne
+    for l in po_lines:
+        l["analytic_id"] = po_to_analytic.get(l["order_id"][0])
+
+    # 3) Charger invoice_policy
     product_ids = list({l["product_id"][0] for l in po_lines if l.get("product_id")})
     policy_map = {}
     if product_ids:
@@ -122,18 +148,8 @@ def load_purchase_data_all_projects():
         )
         policy_map = {p["id"]: p["invoice_policy"] for p in products}
 
-    # Charger PO (buyer + nom)
-    po_ids = list({l["order_id"][0] for l in po_lines})
-    po_data = models.execute_kw(
-        DB, uid, PASSWORD,
-        "purchase.order", "read",
-        [po_ids],
-        {"fields": ["id", "user_id", "name"]}
-    )
-    buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
-    po_name_map = {po["id"]: po["name"] for po in po_data}
-
     return po_lines, policy_map, buyer_map, po_name_map
+
 
 
 def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
@@ -142,17 +158,17 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     formatted = []
 
     # ID analytique du projet
-    analytic_id = project["partner_id"][0] if project.get("partner_id") else None
+    analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
 
     for l in po_lines:
         # Vérifier si la ligne appartient au projet
-        if l.get("analytic_account_id") != analytic_id:
+        if l["analytic_id"] != analytic_id:
             continue
 
         # Filtre invoice_policy == delivery
         #pid = l.get("product_id")
         #if not pid or policy_map.get(pid[0]) != "delivery":
-        #    continue
+         #   continue
 
         # Exclure Ordered = 0
         if l["product_qty"] == 0:
@@ -200,6 +216,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     }
 
     return summary, formatted
+
 
 
 
@@ -488,126 +505,127 @@ def main():
     # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
     # ============================================================
     with tab2:
-        st.markdown("### 📦 Purchases par projet")
-    
-        projects = get_projects(uid, models)
-    
-        # 🔥 Charger toutes les purchases UNE SEULE FOIS
-        po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
-    
-        purchase_data = {}
-        for p in projects:
-            summary, lines = get_purchase_for_project(
-                p['display_name'],
-                po_lines,
-                policy_map,
-                buyer_map,
-                po_name_map
-            )
-            purchase_data[p['id']] = {"summary": summary, "lines": lines}
-    
-        cols_per_row = 6
-        for i in range(0, len(projects), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for col, p in zip(cols, projects[i:i+cols_per_row]):
-                with col:
-                    client = p["company"]
-                    desc_clean = clean_description_from_display_name(p['display_name'])
-                    desc_short_25 = short_desc(desc_clean, 25)
-    
-                    summary = purchase_data[p['id']]["summary"]
-                    total = summary["total"]
-                    total_safe = max(total, 1)
-                    non_green = total - summary["green"]
-                    pct_orange = 100 * summary["orange"] / total_safe
-                    pct_grey = 100 * summary["grey"] / total_safe
-                    pct_white = 100 * summary["white"] / total_safe
-                    pct_green = 100 * summary["green"] / total_safe
-    
-                    if non_green == 0:
-                        text_color = "white"
-                    elif summary["grey"] > 0:
-                        text_color = "red"
-                    else:
-                        text_color = "#FFA000"
-    
-                    if st.button(
-                        f"{client}\n {desc_short_25}",
-                        key=f"proj_btn_{p['id']}"
-                    ):
-                        st.session_state["selected_purchase_project_id"] = p['id']
-    
-                    st.markdown(
-                        f"""
-                        <div style="
-                            width:100%;
-                            height:12px;
-                            border-radius:6px;
-                            overflow:hidden;
-                            display:flex;
-                            margin-top:4px;
-                            border:1px solid #444;
-                        ">
-                            <div style="width:{pct_orange}%;background:#FFA000;"></div>
-                            <div style="width:{pct_grey}%;background:#757575;"></div>
-                            <div style="width:{pct_white}%;background:#FFFFFF;"></div>
-                            <div style="width:{pct_green}%;background:#2E7D32;"></div>
-                        </div>
-                        <div style="text-align:right;font-size:12px;color:{text_color};margin-top:2px;">
-                            {summary["green"]} / {total} lignes
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-    
-        st.markdown("---")
-        st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
-    
-        selected_purchase_project_id = st.session_state.get("selected_purchase_project_id", None)
-        if selected_purchase_project_id is None:
-            st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
+    st.markdown("### 📦 Purchases par projet")
+
+    projects = get_projects(uid, models)
+
+    # 🔥 Charger toutes les purchases UNE SEULE FOIS
+    po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
+
+    purchase_data = {}
+    for p in projects:
+        summary, lines = get_purchase_for_project(
+            p,
+            po_lines,
+            policy_map,
+            buyer_map,
+            po_name_map
+        )
+        purchase_data[p['id']] = {"summary": summary, "lines": lines}
+
+    cols_per_row = 6
+    for i in range(0, len(projects), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col, p in zip(cols, projects[i:i+cols_per_row]):
+            with col:
+                client = p["company"]
+                desc_clean = clean_description_from_display_name(p['display_name'])
+                desc_short_25 = short_desc(desc_clean, 25)
+
+                summary = purchase_data[p['id']]["summary"]
+                total = summary["total"]
+                total_safe = max(total, 1)
+                non_green = total - summary["green"]
+                pct_orange = 100 * summary["orange"] / total_safe
+                pct_grey = 100 * summary["grey"] / total_safe
+                pct_white = 100 * summary["white"] / total_safe
+                pct_green = 100 * summary["green"] / total_safe
+
+                if non_green == 0:
+                    text_color = "white"
+                elif summary["grey"] > 0:
+                    text_color = "red"
+                else:
+                    text_color = "#FFA000"
+
+                if st.button(
+                    f"{client}\n {desc_short_25}",
+                    key=f"proj_btn_{p['id']}"
+                ):
+                    st.session_state["selected_purchase_project_id"] = p['id']
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        width:100%;
+                        height:12px;
+                        border-radius:6px;
+                        overflow:hidden;
+                        display:flex;
+                        margin-top:4px;
+                        border:1px solid #444;
+                    ">
+                        <div style="width:{pct_orange}%;background:#FFA000;"></div>
+                        <div style="width:{pct_grey}%;background:#757575;"></div>
+                        <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                        <div style="width:{pct_green}%;background:#2E7D32;"></div>
+                    </div>
+                    <div style="text-align:right;font-size:12px;color:{text_color};margin-top:2px;">
+                        {summary["green"]} / {total} lignes
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+    st.markdown("---")
+    st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
+
+    selected_purchase_project_id = st.session_state.get("selected_purchase_project_id", None)
+    if selected_purchase_project_id is None:
+        st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
+    else:
+        p = next(p for p in projects if p['id'] == selected_purchase_project_id)
+        st.markdown(
+            f"<div style='font-size:15px;'><b>Projet sélectionné :</b> "
+            f"{p['company']} - {p.get('name') or p['display_name']}</div>",
+            unsafe_allow_html=True
+        )
+
+        lines = purchase_data[p['id']]["lines"]
+
+        if not lines:
+            st.info("Aucune ligne d'achat trouvée pour ce projet.")
         else:
-            p = next(p for p in projects if p['id'] == selected_purchase_project_id)
-            st.markdown(
-                f"<div style='font-size:15px;'><b>Projet sélectionné :</b> "
-                f"{p['company']} - {p.get('name') or p['display_name']}</div>",
-                unsafe_allow_html=True
-            )
-    
-            lines = purchase_data[p['id']]["lines"]
-    
-            if not lines:
-                st.info("Aucune ligne d'achat trouvée pour ce projet.")
-            else:
-                st.markdown(f"**Total lignes : {len(lines)}**")
-                for row in lines:
-                    st.markdown(
-                        f"""
-                        <div style="
-                            background:{row['Color']};
-                            padding:8px 12px;
-                            border-radius:4px;
-                            margin-bottom:5px;
-                            border:1px solid #555;
-                            font-size:14px;
-                            color:black;
-                            display:grid;
-                            grid-template-columns: 90px 190px 1fr 80px 90px 110px;
-                            column-gap:12px;
-                            text-align:left;
-                            align-items:center;
-                            line-height:1.3;
-                        ">
-                            <div style="white-space:nowrap;"><b>PO:</b> {row['PO']}</div>
-                            <div style="white-space:nowrap;"><b>Buyer:</b> {row['Buyer']}</div>
-                            <div><b>Description:</b> {row['Description']}</div>
-                            <div style="white-space:nowrap;"><b>Ord.:</b> {row['Ordered']}</div>
-                            <div style="white-space:nowrap;"><b>Reçu:</b> {row['Received']}</div>
-                            <div style="white-space:nowrap;"><b>Date:</b> {row['Planned Date']}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
+            st.markdown(f"**Total lignes : {len(lines)}**")
+            for row in lines:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{row['Color']};
+                        padding:8px 12px;
+                        border-radius:4px;
+                        margin-bottom:5px;
+                        border:1px solid #555;
+                        font-size:14px;
+                        color:black;
+                        display:grid;
+                        grid-template-columns: 90px 190px 1fr 80px 90px 110px;
+                        column-gap:12px;
+                        text-align:left;
+                        align-items:center;
+                        line-height:1.3;
+                    ">
+                        <div style="white-space:nowrap;"><b>PO:</b> {row['PO']}</div>
+                        <div style="white-space:nowrap;"><b>Buyer:</b> {row['Buyer']}</div>
+                        <div><b>Description:</b> {row['Description']}</div>
+                        <div style="white-space:nowrap;"><b>Ord.:</b> {row['Ordered']}</div>
+                        <div style="white-space:nowrap;"><b>Reçu:</b> {row['Received']}</div>
+                        <div style="white-space:nowrap;"><b>Date:</b> {row['Planned Date']}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
 
 
     st.markdown("""
