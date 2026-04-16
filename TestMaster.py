@@ -46,7 +46,7 @@ def get_projects(uid, models):
         ('tag_ids', 'in', tag_prolig),
     ]
 
-    fields = ['id', 'display_name', 'partner_id', 'name']
+    fields = ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id']
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read', [domain], {'fields': fields})
 
@@ -98,7 +98,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # 1) Charger tous les PO avec analytic_account_id
+    # 1️⃣ Charger tous les PO avec analytic_account_id
     po_data = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "search_read",
@@ -106,7 +106,6 @@ def load_purchase_data_all_projects():
         {"fields": ["id", "analytic_account_id", "user_id", "name"]}
     )
 
-    # Mapping PO → analytic account
     po_to_analytic = {
         po["id"]: (po["analytic_account_id"][0] if po["analytic_account_id"] else None)
         for po in po_data
@@ -121,7 +120,7 @@ def load_purchase_data_all_projects():
 
     po_ids = list(po_to_analytic.keys())
 
-    # 2) Charger toutes les lignes d'achat
+    # 2️⃣ Charger toutes les lignes d'achat
     po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
@@ -136,7 +135,7 @@ def load_purchase_data_all_projects():
     for l in po_lines:
         l["analytic_id"] = po_to_analytic.get(l["order_id"][0])
 
-    # 3) Charger invoice_policy
+    # 3️⃣ Charger invoice_policy
     product_ids = list({l["product_id"][0] for l in po_lines if l.get("product_id")})
     policy_map = {}
     if product_ids:
@@ -151,15 +150,16 @@ def load_purchase_data_all_projects():
     return po_lines, policy_map, buyer_map, po_name_map
 
 
-
 def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
     today = date.today()
     orange = grey = white = green = 0
     formatted = []
 
+    # ✅ ID analytique du projet
     analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
 
     for l in po_lines:
+        # 🔥 Filtrer uniquement les lignes du projet
         if l["analytic_id"] != analytic_id:
             continue
 
@@ -175,7 +175,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
 
         if l["date_planned"]:
             d = l["date_planned"].split(" ")[0]
-            dp = datetime.strptime(d, '%Y-%m-%d').date()
+            dp = datetime.strptime(d, "%Y-%m-%d").date()
         else:
             dp = None
 
@@ -212,11 +212,6 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     }
 
     return summary, formatted
-
-
-
-
-
 
 
 # ============================================================
