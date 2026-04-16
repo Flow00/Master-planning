@@ -17,8 +17,7 @@ PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 # 🔧 ODOO HELPERS + CACHE
 # ============================================================
 
-@st.cache_data(ttl=300)
-def cached_connect_odoo():
+def connect_odoo():
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
     if not uid:
@@ -29,7 +28,7 @@ def cached_connect_odoo():
 
 @st.cache_data(ttl=300)
 def cached_get_projects():
-    uid, models = cached_connect_odoo()
+     uid, models = connect_odoo()
 
     tag_engineering = models.execute_kw(
         DB, uid, PASSWORD,
@@ -338,7 +337,8 @@ def main():
     """, unsafe_allow_html=True)
 
     try:
-        uid, models = cached_connect_odoo()
+        uid, models = connect_odoo()
+        projects = cached_get_projects()
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
         return
