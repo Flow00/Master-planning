@@ -4,7 +4,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
-from streamlit_plotly_events import plotly_events
 
 # ---------- CONFIG ODOO ----------
 ODOO_URL = "https://olsen-engineering.odoo.com"
@@ -14,9 +13,131 @@ PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 
 
 # ============================================================
-# 🔧 ODOO HELPERS + CACHE
+# 🔧 ODOO HELPERS
 # ============================================================
 
+@st.cache_data(ttl=300)
+@st.cache_data(ttl=300)
+def load_purchase_data(project_name):
+    uid, models = connect_odoo()
+
+    # 1) Trouver les analytic accounts
+    analytic_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.account", "search",
+        [[("name", "ilike", project_name)]]
+    )
+    if not analytic_ids:
+        return {"summary": {}, "lines": []}
+
+    # 2) Trouver les PO
+    po_ids = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "search",
+        [[("analytic_account_id", "in", analytic_ids),
+          ("state", "=", "purchase")]]
+    )
+    if not po_ids:
+        return {"summary": {}, "lines": []}
+
+    # 3) Charger toutes les lignes d'achat (UNE SEULE FOIS)
+    lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order.line", "search_read",
+        [[("order_id", "in", po_ids)]],
+        {"fields": [
+            "name", "product_qty", "qty_received",
+            "date_planned", "order_id", "product_id"
+        ]}
+    )
+
+    # 4) Charger invoice_policy
+    product_ids = [l["product_id"][0] for l in lines if l.get("product_id")]
+    policy_map = {}
+    if product_ids:
+        products = models.execute_kw(
+            DB, uid, PASSWORD,
+            "product.product", "read",
+            [product_ids],
+            {"fields": ["invoice_policy"]}
+        )
+        policy_map = {p["id"]: p["invoice_policy"] for p in products}
+
+    # 5) Filtrer invoice_policy == "order"
+    filtered = []
+    for l in lines:
+        pid = l.get("product_id")
+    
+        # 1) Garder UNIQUEMENT les produits facturés sur livraison
+        if not pid or policy_map.get(pid[0]) != "delivery":
+            continue
+    
+        # 2) Exclure les lignes où Ordered = 0
+        if l["product_qty"] == 0:
+            continue
+    
+        filtered.append(l)
+
+    # 6) Construire summary + détail
+    today = date.today()
+    orange = grey = white = green = 0
+    formatted = []
+
+    # Charger PO → buyer + nom
+    po_data = models.execute_kw(
+        DB, uid, PASSWORD,
+        "purchase.order", "read",
+        [po_ids],
+        {"fields": ["id", "user_id", "name"]}
+    )
+    buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
+    po_name_map = {po["id"]: po["name"] for po in po_data}
+
+    for l in filtered:
+        qty_o = l["product_qty"]
+        qty_r = l["qty_received"]
+
+        if l["date_planned"]:
+            d = l["date_planned"].split(" ")[0]
+            dp = datetime.strptime(d, "%Y-%m-%d").date()
+        else:
+            dp = None
+
+        if qty_r >= qty_o:
+            color = "#2E7D32"; rank = 3; green += 1
+        elif qty_r > 0:
+            color = "#FFA000"; rank = 0; orange += 1
+        elif dp and dp < today:
+            color = "#757575"; rank = 1; grey += 1
+        else:
+            color = "#FFFFFF"; rank = 2; white += 1
+
+        po_id = l["order_id"][0]
+
+        formatted.append({
+            "PO": po_name_map.get(po_id, str(po_id)),
+            "Buyer": buyer_map.get(po_id, "Unknown"),
+            "Description": short_desc(l["name"], 50),
+            "Ordered": qty_o,
+            "Received": qty_r,
+            "Planned Date": dp,
+            "Color": color,
+            "Rank": rank
+        })
+
+    formatted.sort(key=lambda x: x["Rank"])
+
+    summary = {
+        "orange": orange,
+        "grey": grey,
+        "white": white,
+        "green": green,
+        "total": orange + grey + white + green
+    }
+
+    return {"summary": summary, "lines": formatted}
+
+    
 def connect_odoo():
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
@@ -26,10 +147,25 @@ def connect_odoo():
     return uid, models
 
 
-@st.cache_data(ttl=300)
-def cached_get_projects():
-    uid, models = connect_odoo()
+def get_top_company(uid, models, partner_id):
+    if not partner_id:
+        return "N/A"
 
+    pid = partner_id[0]
+    data = models.execute_kw(
+        DB, uid, PASSWORD,
+        "res.partner", "read",
+        [pid], {"fields": ["name", "parent_id"]}
+    )[0]
+
+    if not data["parent_id"]:
+        return data["name"]
+
+    parent = data["parent_id"]
+    return parent[1]
+
+
+def get_projects(uid, models):
     tag_engineering = models.execute_kw(
         DB, uid, PASSWORD,
         'project.tags', 'search', [[('name', '=', 'Engineering')]]
@@ -53,23 +189,8 @@ def cached_get_projects():
         'project.project', 'search_read', [domain], {'fields': fields}
     )
 
-    # Top company
     for p in projects:
-        partner_id = p["partner_id"][0] if p["partner_id"] else False
-        if not partner_id:
-            p["company"] = "N/A"
-            continue
-
-        data = models.execute_kw(
-            DB, uid, PASSWORD,
-            "res.partner", "read",
-            [partner_id], {"fields": ["name", "parent_id"]}
-        )[0]
-
-        if not data["parent_id"]:
-            p["company"] = data["name"]
-        else:
-            p["company"] = data["parent_id"][1]
+        p["company"] = get_top_company(uid, models, p["partner_id"])
 
     project_ids = [p["id"] for p in projects]
 
@@ -87,6 +208,7 @@ def cached_get_projects():
             last_update[pid] = u
 
     filtered = [p for p in projects if last_update.get(p["id"], {}).get("status") != "done"]
+
     filtered.sort(key=lambda p: p['display_name'])
     return filtered
 
@@ -119,10 +241,16 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 # ============================================================
 
 def clean_description_from_display_name(display_name: str) -> str:
+    """
+    Supprime uniquement la répétition finale de la description.
+    Ne touche pas au client, ni au code projet, ni aux infos utiles.
+    """
     if " - " not in display_name:
         return display_name
 
     parts = display_name.split(" - ")
+
+    # Si les deux derniers blocs sont identiques → on supprime le dernier
     if len(parts) >= 2 and parts[-1].strip() == parts[-2].strip():
         parts = parts[:-1]
 
@@ -134,6 +262,7 @@ def short_desc(desc: str, max_len: int) -> str:
     if len(desc) <= max_len:
         return desc
     return desc[:max_len].rstrip() + "…"
+
 
 
 # ============================================================
@@ -189,140 +318,32 @@ def classify_task_type(name):
     if "récept" in n or "recept" in n: return "Réception"
 
     return "Autres"
-# ============================================================
-# 🔧 PURCHASE LOADER (SUMMARY + LIGNES, AVEC FILTRE INVOICE POLICY)
-# ============================================================
 
-@st.cache_data(ttl=300)
-def load_purchase_data(project_name):
-    uid, models = connect_odoo()
 
-    analytic_ids = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.analytic.account", "search",
-        [[("name", "ilike", project_name)]]
-    )
+def classify_task_color(name):
+    return COLOR_MAP[classify_task_type(name)]
 
-    if not analytic_ids:
-        return {
-            "summary": {"orange": 0, "grey": 0, "white": 0, "green": 0, "total": 0},
-            "lines": []
-        }
 
-    po_ids = models.execute_kw(
-        DB, uid, PASSWORD,
-        "purchase.order", "search",
-        [[
-            ("analytic_account_id", "in", analytic_ids),
-            ("state", "=", "purchase"),
-        ]]
-    )
+def map_tasks_to_grid(projects, tasks, weeks):
+    proj_index = {p['id']: i for i, p in enumerate(projects)}
+    grid = {}
+    detailed = {}
 
-    if not po_ids:
-        return {
-            "summary": {"orange": 0, "grey": 0, "white": 0, "green": 0, "total": 0},
-            "lines": []
-        }
+    for t in tasks:
+        pid = t['project_id'][0]
+        if pid not in proj_index:
+            continue
+        row = proj_index[pid]
+        color = classify_task_color(t['name'])
 
-    po_data = models.execute_kw(
-        DB, uid, PASSWORD,
-        "purchase.order", "read",
-        [po_ids],
-        {"fields": ["id", "user_id", "name"]}
-    )
-    buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
-    po_name_map = {po["id"]: po["name"] for po in po_data}
+        for col, (_, start_w, end_w) in enumerate(weeks):
+            if start_w <= t['date_deadline'] <= end_w:
+                key = (row, col)
+                grid.setdefault(key, []).append(color)
+                detailed.setdefault(key, []).append(t)
+                break
 
-    lines = models.execute_kw(
-        DB, uid, PASSWORD,
-        "purchase.order.line", "search_read",
-        [[("order_id", "in", po_ids)]],
-        {
-            "fields": [
-                "name",
-                "product_qty",
-                "qty_received",
-                "date_planned",
-                "order_id",
-                "product_id",
-            ]
-        }
-    )
-
-    product_ids = list({l["product_id"][0] for l in lines if l.get("product_id")})
-    policy_map = {}
-    if product_ids:
-        products = models.execute_kw(
-            DB, uid, PASSWORD,
-            "product.product", "read",
-            [product_ids],
-            {"fields": ["invoice_policy"]}
-        )
-        policy_map = {p["id"]: p["invoice_policy"] for p in products}
-
-    today = date.today()
-    orange = grey = white = green = 0
-    formatted = []
-
-    for l in lines:
-        pid = l.get("product_id")
-        if pid:
-            product_id = pid[0]
-            policy = policy_map.get(product_id)
-            if policy == "order":
-                continue  # exclu partout
-
-        qty_ordered = l["product_qty"]
-        qty_received = l["qty_received"]
-
-        if l["date_planned"]:
-            d = l["date_planned"].split(" ")[0]
-            date_planned = datetime.strptime(d, "%Y-%m-%d").date()
-        else:
-            date_planned = None
-
-        if qty_received >= qty_ordered:
-            color = "#2E7D32"; rank = 3
-            green += 1
-        elif qty_received > 0:
-            color = "#FFA000"; rank = 0
-            orange += 1
-        elif date_planned and date_planned < today:
-            color = "#757575"; rank = 1
-            grey += 1
-        else:
-            color = "#FFFFFF"; rank = 2
-            white += 1
-
-        po_id = l["order_id"][0]
-        po_name = po_name_map.get(po_id, str(po_id))
-
-        formatted.append({
-            "PO": po_name,
-            "Buyer": buyer_map.get(po_id, "Unknown"),
-            "Description": short_desc(l["name"], 50),
-            "Ordered": qty_ordered,
-            "Received": qty_received,
-            "Planned Date": date_planned,
-            "Color": color,
-            "Rank": rank
-        })
-
-    total = orange + grey + white + green
-    formatted.sort(key=lambda x: x["Rank"])
-
-    summary = {
-        "orange": orange,
-        "grey": grey,
-        "white": white,
-        "green": green,
-        "total": total
-    }
-
-    return {
-        "summary": summary,
-        "lines": formatted
-    }
+    return grid, detailed
 
 
 # ============================================================
@@ -340,20 +361,19 @@ def main():
 
     try:
         uid, models = connect_odoo()
-        projects = cached_get_projects()
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
         return
 
+    # 🔁 Refresh toutes les 10 minutes
     st_autorefresh(interval=600000, key="refresh_10min")
 
     if "months" not in st.session_state:
         st.session_state["months"] = 3
     if "selected_purchase_project_id" not in st.session_state:
         st.session_state["selected_purchase_project_id"] = None
-    if "gantt_filter" not in st.session_state:
-        st.session_state["gantt_filter"] = None
 
+    # ---------- BANNIÈRE ----------
     col1, col2, col3 = st.columns([1, 3, 1])
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
@@ -374,15 +394,17 @@ def main():
     # 🟦 ONGLET 1 — MASTER PLANNING
     # ============================================================
     with tab1:
-        projects = cached_get_projects()
+        projects = get_projects(uid, models)
         project_ids = [p['id'] for p in projects]
 
         months = st.session_state["months"]
         weeks = build_weeks_horizon(months)
         tasks = get_tasks(uid, models, project_ids, weeks[0][1], weeks[-1][2])
+        grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
 
         def project_label(p):
             client = p["company"]
+            code = p.get('name') or p['display_name']
             desc_clean = clean_description_from_display_name(p['display_name'])
             desc_short = short_desc(desc_clean, 20)
             return f"{client} - {desc_short}"
@@ -402,16 +424,13 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
+        
             df_gantt["Type détaillé"] = pd.Categorical(
                 df_gantt["Type"],
                 categories=COLOR_ORDER,
                 ordered=True
             )
-
-            current_filter = st.session_state.get("gantt_filter", None)
-            if current_filter:
-                df_gantt = df_gantt[df_gantt["Projet"] == current_filter]
-
+        
             fig = px.timeline(
                 df_gantt,
                 x_start="Début",
@@ -420,8 +439,9 @@ def main():
                 color="Type détaillé",
                 color_discrete_map=COLOR_MAP
             )
-
+        
             fig.update_yaxes(autorange="reversed")
+        
             fig.update_layout(
                 dragmode="pan",
                 height=650,
@@ -436,7 +456,7 @@ def main():
                     font=dict(size=10)
                 )
             )
-
+        
             today = date.today()
             fig.add_vline(
                 x=today,
@@ -444,34 +464,20 @@ def main():
                 line_color="white",
                 opacity=0.9
             )
-
+        
             start_view = today
             end_view = today + timedelta(days=30 * months)
             fig.update_xaxes(range=[start_view, end_view])
-
-            clicked = plotly_events(
+        
+            st.plotly_chart(
                 fig,
-                click_event=True,
-                hover_event=False,
-                select_event=False,
-                override_height=650,
-                override_width="100%"
+                use_container_width=True,
+                config={"displaylogo": False}
             )
-
-            if clicked:
-                proj_clicked = clicked[0]["y"]
-                if st.session_state.get("gantt_filter", None) == proj_clicked:
-                    st.session_state["gantt_filter"] = None
-                else:
-                    st.session_state["gantt_filter"] = proj_clicked
-
-            if st.session_state.get("gantt_filter", None):
-                st.markdown(f"**Projet filtré :** {st.session_state['gantt_filter']}")
-            else:
-                st.markdown("**Vue : Tous les projets**")
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
 
+        # Slider SOUS le Gantt
         col_s1, col_s2 = st.columns([3, 1])
         with col_s1:
             new_months = st.slider("", 1, 6, months)
@@ -485,46 +491,57 @@ def main():
             st.session_state["months"] = new_months
             st.experimental_rerun()
 
-        st.subheader("🔍 Tâches du projet sélectionné")
+        # Recherche des tâches par projet
+        st.subheader("🔍 Tâches du projet")
 
-        if st.session_state.get("gantt_filter", None):
-            proj_label = st.session_state["gantt_filter"]
-            proj = next(p for p in projects if project_label(p) == proj_label)
-            proj_id = proj["id"]
-
+        # Liste des projets dans le même format que le Gantt
+        project_labels = {project_label(p): p["id"] for p in projects}
+        
+        selected_label = st.selectbox(
+            "Sélectionne un projet pour afficher ses tâches",
+            ["— Aucun —"] + list(project_labels.keys()),
+            index=0
+        )
+        
+        if selected_label != "— Aucun —":
+            proj_id = project_labels[selected_label]
+        
             tasks_for_project = [t for t in tasks if t["project_id"][0] == proj_id]
-
+        
             if tasks_for_project:
                 for t in tasks_for_project:
                     st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
             else:
                 st.info("Aucune tâche pour ce projet.")
         else:
-            st.info("Clique sur une barre du Gantt pour filtrer un projet.")
+            st.info("Sélectionne un projet pour afficher ses tâches.")
+
+
     # ============================================================
     # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
     # ============================================================
     with tab2:
         st.markdown("### 📦 Purchases par projet")
-
+    
         projects = cached_get_projects()
 
+        # 🔥 Charger toutes les purchases UNE SEULE FOIS
         purchase_data = {
             p['id']: load_purchase_data(p['display_name'])
             for p in projects
         }
-
+    
         cols_per_row = 6
         for i in range(0, len(projects), cols_per_row):
             cols = st.columns(cols_per_row)
             for col, p in zip(cols, projects[i:i+cols_per_row]):
                 with col:
                     client = p["company"]
+                    code = p.get('name') or p['display_name']
                     desc_clean = clean_description_from_display_name(p['display_name'])
                     desc_short_25 = short_desc(desc_clean, 25)
 
-                    data = purchase_data[p['id']]
-                    summary = data["summary"]
+                    summary = purchase_data[p['id']]["summary"]
                     total = summary["total"]
                     total_safe = max(total, 1)
                     non_green = total - summary["green"]
@@ -539,7 +556,7 @@ def main():
                         text_color = "red"
                     else:
                         text_color = "#FFA000"
-
+    
                     if st.button(
                         f"{client}\n {desc_short_25}",
                         key=f"proj_btn_{p['id']}"
@@ -568,7 +585,6 @@ def main():
                         """,
                         unsafe_allow_html=True
                     )
-
         st.markdown("---")
         st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
 
@@ -583,8 +599,7 @@ def main():
                 unsafe_allow_html=True
             )
 
-            data = purchase_data[p['id']]
-            lines = data["lines"]
+            lines = purchase_data[p['id']]["lines"]
 
             if not lines:
                 st.info("Aucune ligne d'achat trouvée pour ce projet.")
