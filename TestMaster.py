@@ -194,7 +194,9 @@ def classify_task_type(name):
 # ============================================================
 
 @st.cache_data(ttl=300)
-def load_purchase_data(uid, models, project_name):
+def load_purchase_data(project_name):
+    uid, models = connect_odoo()
+
     analytic_ids = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.account", "search",
@@ -508,7 +510,7 @@ def main():
         projects = cached_get_projects()
 
         purchase_data = {
-            p['id']: load_purchase_data(uid, models, p['display_name'])
+            p['id']: load_purchase_data(p['display_name'])
             for p in projects
         }
 
