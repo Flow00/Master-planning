@@ -67,8 +67,15 @@ def load_purchase_data(project_name):
     filtered = []
     for l in lines:
         pid = l.get("product_id")
-        if pid and policy_map.get(pid[0]) == "delivery":
+    
+        # 1) Garder UNIQUEMENT les produits facturés sur livraison
+        if not pid or policy_map.get(pid[0]) != "delivery":
             continue
+    
+        # 2) Exclure les lignes où Ordered = 0
+        if l["product_qty"] == 0:
+            continue
+    
         filtered.append(l)
 
     # 6) Construire summary + détail
@@ -424,11 +431,6 @@ def main():
                 ordered=True
             )
         
-            # 🔥 Appliquer le filtre si un projet est sélectionné
-            current_filter = st.session_state.get("gantt_filter", None)
-            if current_filter:
-                df_gantt = df_gantt[df_gantt["Projet"] == current_filter]
-        
             fig = px.timeline(
                 df_gantt,
                 x_start="Début",
@@ -467,28 +469,11 @@ def main():
             end_view = today + timedelta(days=30 * months)
             fig.update_xaxes(range=[start_view, end_view])
         
-            # 🔥 Clic sur une barre
-            clicked = plotly_events(
+            st.plotly_chart(
                 fig,
-                click_event=True,
-                hover_event=False,
-                select_event=False,
-                override_height=650,
-                override_width="100%"
+                use_container_width=True,
+                config={"displaylogo": False}
             )
-        
-            if clicked:
-                proj_clicked = clicked[0]["y"]
-                if st.session_state.get("gantt_filter") == proj_clicked:
-                    st.session_state["gantt_filter"] = None
-                else:
-                    st.session_state["gantt_filter"] = proj_clicked
-        
-            if st.session_state.get("gantt_filter"):
-                st.markdown(f"**Projet filtré :** {st.session_state['gantt_filter']}")
-            else:
-                st.markdown("**Vue : Tous les projets**")
-        
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
 
@@ -507,12 +492,19 @@ def main():
             st.experimental_rerun()
 
         # Recherche des tâches par projet
-        st.subheader("🔍 Tâches du projet sélectionné")
+        st.subheader("🔍 Tâches du projet")
+
+        # Liste des projets dans le même format que le Gantt
+        project_labels = {project_label(p): p["id"] for p in projects}
         
-        if st.session_state.get("gantt_filter"):
-            proj_label = st.session_state["gantt_filter"]
-            proj = next(p for p in projects if project_label(p) == proj_label)
-            proj_id = proj["id"]
+        selected_label = st.selectbox(
+            "Sélectionne un projet pour afficher ses tâches",
+            ["— Aucun —"] + list(project_labels.keys()),
+            index=0
+        )
+        
+        if selected_label != "— Aucun —":
+            proj_id = project_labels[selected_label]
         
             tasks_for_project = [t for t in tasks if t["project_id"][0] == proj_id]
         
@@ -522,7 +514,8 @@ def main():
             else:
                 st.info("Aucune tâche pour ce projet.")
         else:
-            st.info("Clique sur une barre du Gantt pour filtrer un projet.")
+            st.info("Sélectionne un projet pour afficher ses tâches.")
+
 
     # ============================================================
     # 🟩 ONGLET 2 — PURCHASE TRACKING (HYBRIDE)
