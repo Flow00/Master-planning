@@ -11,47 +11,107 @@ DB = "mynalios-olsen-main-7388485"
 USERNAME = "f.mordant@olsen-engineering.com"
 PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 
-
 # ============================================================
 # 🔧 ODOO HELPERS
 # ============================================================
 
+def connect_odoo():
+    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+    uid = common.authenticate(DB, USERNAME, PASSWORD, {})
+    if not uid:
+        raise Exception("Échec d'authentification Odoo")
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    return uid, models
+
+def get_top_company(uid, models, partner_id):
+    if not partner_id:
+        return "N/A"
+    pid = partner_id[0]
+    data = models.execute_kw(
+        DB, uid, PASSWORD,
+        "res.partner", "read",
+        [pid], {"fields": ["name", "parent_id"]}
+    )[0]
+    if not data["parent_id"]:
+        return data["name"]
+    return data["parent_id"][1]
+
+def get_projects(uid, models):
+    tag_engineering = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', '=', 'Engineering')]])
+    tag_prolig = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', 'ilike', 'PRO (LIG)')]])
+
+    domain = [
+        ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
+        ('tag_ids', 'in', tag_engineering),
+        ('tag_ids', 'in', tag_prolig),
+    ]
+
+    fields = ['id', 'display_name', 'partner_id', 'name']
+
+    projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read', [domain], {'fields': fields})
+
+    for p in projects:
+        p["company"] = get_top_company(uid, models, p["partner_id"])
+
+    project_ids = [p["id"] for p in projects]
+
+    updates = models.execute_kw(
+        DB, uid, PASSWORD,
+        'project.update', 'search_read',
+        [[('project_id', 'in', project_ids)]],
+        {'fields': ['project_id', 'status', 'write_date']}
+    )
+
+    last_update = {}
+    for u in updates:
+        pid = u["project_id"][0]
+        if pid not in last_update or u["write_date"] > last_update[pid]["write_date"]:
+            last_update[pid] = u
+
+    filtered = [p for p in projects if last_update.get(p["id"], {}).get("status") != "done"]
+    filtered.sort(key=lambda p: p['display_name'])
+    return filtered
+
+def get_tasks(uid, models, project_ids, start_date, end_date):
+    domain = [
+        ('project_id', 'in', project_ids),
+        ('date_deadline', '!=', False),
+        ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)']),
+    ]
+    fields = ['id', 'name', 'project_id', 'date_deadline']
+
+    tasks = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read', [domain], {'fields': fields})
+
+    for t in tasks:
+        raw = t['date_deadline']
+        if raw:
+            raw = raw.split(" ")[0]
+            t['date_deadline'] = datetime.strptime(raw, '%Y-%m-%d').date()
+
+    return tasks
+
+# ============================================================
+# 🔥 PURCHASE LOADER ULTRA RAPIDE
+# ============================================================
+
 @st.cache_data(ttl=300)
-def load_purchase_data(project_name):
+def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # 1) Trouver les analytic accounts
-    analytic_ids = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.analytic.account", "search",
-        [[("name", "ilike", project_name)]]
-    )
-    if not analytic_ids:
-        return {"summary": {}, "lines": []}
-
-    # 2) Trouver les PO
-    po_ids = models.execute_kw(
-        DB, uid, PASSWORD,
-        "purchase.order", "search",
-        [[("analytic_account_id", "in", analytic_ids),
-          ("state", "=", "purchase")]]
-    )
-    if not po_ids:
-        return {"summary": {}, "lines": []}
-
-    # 3) Charger toutes les lignes d'achat (UNE SEULE FOIS)
-    lines = models.execute_kw(
+    # Charger toutes les lignes d'achat
+    po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
-        [[("order_id", "in", po_ids)]],
+        [[("state", "=", "purchase")]],
         {"fields": [
             "name", "product_qty", "qty_received",
-            "date_planned", "order_id", "product_id"
+            "date_planned", "order_id", "product_id",
+            "analytic_distribution"
         ]}
     )
 
-    # 4) Charger invoice_policy
-    product_ids = [l["product_id"][0] for l in lines if l.get("product_id")]
+    # Charger invoice_policy
+    product_ids = list({l["product_id"][0] for l in po_lines if l.get("product_id")})
     policy_map = {}
     if product_ids:
         products = models.execute_kw(
@@ -62,27 +122,8 @@ def load_purchase_data(project_name):
         )
         policy_map = {p["id"]: p["invoice_policy"] for p in products}
 
-    # 5) Filtrer invoice_policy == "order"
-    filtered = []
-    for l in lines:
-        pid = l.get("product_id")
-    
-        # 1) Garder UNIQUEMENT les produits facturés sur livraison
-        if not pid or policy_map.get(pid[0]) != "delivery":
-            continue
-    
-        # 2) Exclure les lignes où Ordered = 0
-        if l["product_qty"] == 0:
-            continue
-    
-        filtered.append(l)
-
-    # 6) Construire summary + détail
-    today = date.today()
-    orange = grey = white = green = 0
-    formatted = []
-
-    # Charger PO → buyer + nom
+    # Charger PO (buyer + nom)
+    po_ids = list({l["order_id"][0] for l in po_lines})
     po_data = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "read",
@@ -92,13 +133,31 @@ def load_purchase_data(project_name):
     buyer_map = {po["id"]: (po["user_id"][1] if po["user_id"] else "Unknown") for po in po_data}
     po_name_map = {po["id"]: po["name"] for po in po_data}
 
-    for l in filtered:
+    return po_lines, policy_map, buyer_map, po_name_map
+
+def get_purchase_for_project(project_name, po_lines, policy_map, buyer_map, po_name_map):
+    today = date.today()
+    orange = grey = white = green = 0
+    formatted = []
+
+    for l in po_lines:
+        dist = l.get("analytic_distribution") or {}
+        if not any(project_name.lower() in k.lower() for k in dist.keys()):
+            continue
+
+        pid = l.get("product_id")
+        if not pid or policy_map.get(pid[0]) != "delivery":
+            continue
+
+        if l["product_qty"] == 0:
+            continue
+
         qty_o = l["product_qty"]
         qty_r = l["qty_received"]
 
         if l["date_planned"]:
             d = l["date_planned"].split(" ")[0]
-            dp = datetime.strptime(d, "%Y-%m-%d").date()
+            dp = datetime.strptime(d, '%Y-%m-%d').date()
         else:
             dp = None
 
@@ -134,133 +193,8 @@ def load_purchase_data(project_name):
         "total": orange + grey + white + green
     }
 
-    return {"summary": summary, "lines": formatted}
+    return summary, formatted
 
-    
-def connect_odoo():
-    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
-    uid = common.authenticate(DB, USERNAME, PASSWORD, {})
-    if not uid:
-        raise Exception("Échec d'authentification Odoo")
-    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
-    return uid, models
-
-
-def get_top_company(uid, models, partner_id):
-    if not partner_id:
-        return "N/A"
-
-    pid = partner_id[0]
-    data = models.execute_kw(
-        DB, uid, PASSWORD,
-        "res.partner", "read",
-        [pid], {"fields": ["name", "parent_id"]}
-    )[0]
-
-    if not data["parent_id"]:
-        return data["name"]
-
-    parent = data["parent_id"]
-    return parent[1]
-
-
-def get_projects(uid, models):
-    tag_engineering = models.execute_kw(
-        DB, uid, PASSWORD,
-        'project.tags', 'search', [[('name', '=', 'Engineering')]]
-    )
-
-    tag_prolig = models.execute_kw(
-        DB, uid, PASSWORD,
-        'project.tags', 'search', [[('name', 'ilike', 'PRO (LIG)')]]
-    )
-
-    domain = [
-        ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-        ('tag_ids', 'in', tag_engineering),
-        ('tag_ids', 'in', tag_prolig),
-    ]
-
-    fields = ['id', 'display_name', 'partner_id', 'name']
-
-    projects = models.execute_kw(
-        DB, uid, PASSWORD,
-        'project.project', 'search_read', [domain], {'fields': fields}
-    )
-
-    for p in projects:
-        p["company"] = get_top_company(uid, models, p["partner_id"])
-
-    project_ids = [p["id"] for p in projects]
-
-    updates = models.execute_kw(
-        DB, uid, PASSWORD,
-        'project.update', 'search_read',
-        [[('project_id', 'in', project_ids)]],
-        {'fields': ['project_id', 'status', 'write_date']}
-    )
-
-    last_update = {}
-    for u in updates:
-        pid = u["project_id"][0]
-        if pid not in last_update or u["write_date"] > last_update[pid]["write_date"]:
-            last_update[pid] = u
-
-    filtered = [p for p in projects if last_update.get(p["id"], {}).get("status") != "done"]
-
-    filtered.sort(key=lambda p: p['display_name'])
-    return filtered
-
-
-def get_tasks(uid, models, project_ids, start_date, end_date):
-    domain = [
-        ('project_id', 'in', project_ids),
-        ('date_deadline', '!=', False),
-        ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)']),
-    ]
-
-    fields = ['id', 'name', 'project_id', 'date_deadline']
-
-    tasks = models.execute_kw(
-        DB, uid, PASSWORD,
-        'project.task', 'search_read', [domain], {'fields': fields}
-    )
-
-    for t in tasks:
-        raw = t['date_deadline']
-        if raw:
-            raw = raw.split(" ")[0]
-            t['date_deadline'] = datetime.strptime(raw, '%Y-%m-%d').date()
-
-    return tasks
-
-
-# ============================================================
-# 🔧 PARSING DES NOMS / DESCRIPTIONS
-# ============================================================
-
-def clean_description_from_display_name(display_name: str) -> str:
-    """
-    Supprime uniquement la répétition finale de la description.
-    Ne touche pas au client, ni au code projet, ni aux infos utiles.
-    """
-    if " - " not in display_name:
-        return display_name
-
-    parts = display_name.split(" - ")
-
-    # Si les deux derniers blocs sont identiques → on supprime le dernier
-    if len(parts) >= 2 and parts[-1].strip() == parts[-2].strip():
-        parts = parts[:-1]
-
-    desc_clean = " - ".join(parts)
-    return desc_clean
-
-
-def short_desc(desc: str, max_len: int) -> str:
-    if len(desc) <= max_len:
-        return desc
-    return desc[:max_len].rstrip() + "…"
 
 
 
@@ -523,12 +457,20 @@ def main():
         st.markdown("### 📦 Purchases par projet")
     
         projects = get_projects(uid, models)
-
+    
         # 🔥 Charger toutes les purchases UNE SEULE FOIS
-        purchase_data = {
-            p['id']: load_purchase_data(p['display_name'])
-            for p in projects
-        }
+        po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
+    
+        purchase_data = {}
+        for p in projects:
+            summary, lines = get_purchase_for_project(
+                p['display_name'],
+                po_lines,
+                policy_map,
+                buyer_map,
+                po_name_map
+            )
+            purchase_data[p['id']] = {"summary": summary, "lines": lines}
     
         cols_per_row = 6
         for i in range(0, len(projects), cols_per_row):
@@ -536,10 +478,9 @@ def main():
             for col, p in zip(cols, projects[i:i+cols_per_row]):
                 with col:
                     client = p["company"]
-                    code = p.get('name') or p['display_name']
                     desc_clean = clean_description_from_display_name(p['display_name'])
                     desc_short_25 = short_desc(desc_clean, 25)
-
+    
                     summary = purchase_data[p['id']]["summary"]
                     total = summary["total"]
                     total_safe = max(total, 1)
@@ -548,7 +489,7 @@ def main():
                     pct_grey = 100 * summary["grey"] / total_safe
                     pct_white = 100 * summary["white"] / total_safe
                     pct_green = 100 * summary["green"] / total_safe
-
+    
                     if non_green == 0:
                         text_color = "white"
                     elif summary["grey"] > 0:
@@ -561,7 +502,7 @@ def main():
                         key=f"proj_btn_{p['id']}"
                     ):
                         st.session_state["selected_purchase_project_id"] = p['id']
-
+    
                     st.markdown(
                         f"""
                         <div style="
@@ -584,9 +525,10 @@ def main():
                         """,
                         unsafe_allow_html=True
                     )
+    
         st.markdown("---")
         st.subheader("📋 Détail des lignes d'achat du projet sélectionné")
-
+    
         selected_purchase_project_id = st.session_state.get("selected_purchase_project_id", None)
         if selected_purchase_project_id is None:
             st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
@@ -597,9 +539,9 @@ def main():
                 f"{p['company']} - {p.get('name') or p['display_name']}</div>",
                 unsafe_allow_html=True
             )
-
+    
             lines = purchase_data[p['id']]["lines"]
-
+    
             if not lines:
                 st.info("Aucune ligne d'achat trouvée pour ce projet.")
             else:
@@ -632,6 +574,7 @@ def main():
                         """,
                         unsafe_allow_html=True
                     )
+
 
     st.markdown("""
     <style>
