@@ -278,6 +278,26 @@ def map_tasks_to_grid(projects, tasks, weeks):
 
     return grid, detailed
 
+def clean_description_from_display_name(display_name: str) -> str:
+    if not display_name:
+        return ""
+    if " - " not in display_name:
+        return display_name
+
+    parts = display_name.split(" - ")
+
+    if len(parts) >= 2 and parts[-1].strip() == parts[-2].strip():
+        parts = parts[:-1]
+
+    return " - ".join(parts)
+
+def short_desc(desc: str, max_len: int) -> str:
+    if not desc:
+        return ""
+    if len(desc) <= max_len:
+        return desc
+    return desc[:max_len].rstrip() + "…"
+    
 def project_label(p):
     client = p.get("company", "N/A")
 
