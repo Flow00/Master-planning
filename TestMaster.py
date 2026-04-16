@@ -67,7 +67,7 @@ def load_purchase_data(project_name):
     filtered = []
     for l in lines:
         pid = l.get("product_id")
-        if pid and policy_map.get(pid[0]) == "order":
+        if pid and policy_map.get(pid[0]) == "delivery":
             continue
         filtered.append(l)
 
