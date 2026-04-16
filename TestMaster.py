@@ -36,6 +36,17 @@ def get_top_company(uid, models, partner_id):
         return data["name"]
     return data["parent_id"][1]
 
+import re
+
+def extract_project_code(display_name: str) -> str:
+    """
+    Extrait le code projet du type S24-01819 ou S25-00442
+    """
+    if not display_name:
+        return ""
+    m = re.search(r"S\d{2}-\d{5}", display_name)
+    return m.group(0) if m else ""
+    
 def get_projects(uid, models):
     tag_engineering = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', '=', 'Engineering')]])
     tag_prolig = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', 'ilike', 'PRO (LIG)')]])
@@ -155,18 +166,25 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     orange = grey = white = green = 0
     formatted = []
 
-    # ✅ ID analytique du projet
-    analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
+    # 🔥 Extraire le code projet (ex: S25-00442)
+    project_code = extract_project_code(project["display_name"])
+
+    if not project_code:
+        return {"orange":0,"grey":0,"white":0,"green":0,"total":0}, []
 
     for l in po_lines:
-        # 🔥 Filtrer uniquement les lignes du projet
-        if l["analytic_id"] != analytic_id:
+
+        # 🔥 Filtrer via analytic_distribution
+        dist = l.get("analytic_distribution") or {}
+        if not any(project_code in key for key in dist.keys()):
             continue
 
+        # Filtre invoice_policy == delivery
         pid = l.get("product_id")
         if not pid or policy_map.get(pid[0]) != "delivery":
             continue
 
+        # Exclure Ordered = 0
         if l["product_qty"] == 0:
             continue
 
@@ -212,6 +230,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     }
 
     return summary, formatted
+
 
 
 # ============================================================
