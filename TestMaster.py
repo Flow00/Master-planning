@@ -157,20 +157,16 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     orange = grey = white = green = 0
     formatted = []
 
-    # ID analytique du projet
     analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
 
     for l in po_lines:
-        # Vérifier si la ligne appartient au projet
         if l["analytic_id"] != analytic_id:
             continue
 
-        # Filtre invoice_policy == delivery
-        #pid = l.get("product_id")
-        #if not pid or policy_map.get(pid[0]) != "delivery":
-         #   continue
+        pid = l.get("product_id")
+        if not pid or policy_map.get(pid[0]) != "delivery":
+            continue
 
-        # Exclure Ordered = 0
         if l["product_qty"] == 0:
             continue
 
@@ -216,6 +212,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     }
 
     return summary, formatted
+
 
 
 
