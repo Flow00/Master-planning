@@ -28,7 +28,7 @@ def connect_odoo():
 
 @st.cache_data(ttl=300)
 def cached_get_projects():
-     uid, models = connect_odoo()
+    uid, models = connect_odoo()
 
     tag_engineering = models.execute_kw(
         DB, uid, PASSWORD,
