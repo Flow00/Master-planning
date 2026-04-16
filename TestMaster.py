@@ -177,9 +177,9 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
         if l["analytic_id"] != analytic_id:
             continue
 
-        pid = l.get("product_id")
-        if not pid or policy_map.get(pid[0]) != "delivery":
-            continue
+        #pid = l.get("product_id")
+        #if not pid or policy_map.get(pid[0]) != "delivery":
+         #   continue
 
         if l["product_qty"] == 0:
             continue
