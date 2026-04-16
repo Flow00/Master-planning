@@ -336,10 +336,14 @@ def main():
         grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
 
         def project_label(p):
-            client = p["company"]
-            code = p.get('name') or p['display_name']
-            desc_clean = clean_description_from_display_name(p['display_name'])
+            client = p.get("company", "N/A")
+        
+            # Sécuriser display_name
+            display = p.get("display_name") or p.get("name") or "Projet"
+        
+            desc_clean = clean_description_from_display_name(display)
             desc_short = short_desc(desc_clean, 20)
+        
             return f"{client} - {desc_short}"
 
         st.subheader("📊 Gantt")
