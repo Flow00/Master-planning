@@ -522,7 +522,7 @@ def main():
     
         # 🔥 Charger toutes les purchases UNE SEULE FOIS
         po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
-    
+        st.write("DEBUG analytic_distribution example:", po_lines[0].get("analytic_distribution"))
         purchase_data = {}
         for p in projects:
             summary, lines = get_purchase_for_project(
