@@ -17,7 +17,6 @@ PASSWORD = "a9a52b95f9ba02f3d813aa02e113d51ffac6de1d"
 # ============================================================
 
 @st.cache_data(ttl=300)
-@st.cache_data(ttl=300)
 def load_purchase_data(project_name):
     uid, models = connect_odoo()
 
@@ -523,7 +522,7 @@ def main():
     with tab2:
         st.markdown("### 📦 Purchases par projet")
     
-        projects = cached_get_projects()
+        projects = get_projects(uid, models)
 
         # 🔥 Charger toutes les purchases UNE SEULE FOIS
         purchase_data = {
