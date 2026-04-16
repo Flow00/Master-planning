@@ -462,11 +462,15 @@ def main():
         if selected_label != "— Aucun —":
             proj_id = project_labels[selected_label]
         
-            tasks_for_project = [t for t in tasks if t["project_id"][0] == proj_id]
+            tasks_for_project = sorted(
+                [t for t in tasks if t["project_id"][0] == proj_id],
+                key=lambda x: x["date_deadline"]
+            )
         
             if tasks_for_project:
                 for t in tasks_for_project:
-                    st.write(f"- **{t['name']}** — deadline : {t['date_deadline']}")
+                    date_str = t["date_deadline"].strftime("%d-%m-%Y")
+                    st.write(f"- **{t['name']}** — deadline : {date_str}")
             else:
                 st.info("Aucune tâche pour ce projet.")
         else:
