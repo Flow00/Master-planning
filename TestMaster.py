@@ -529,7 +529,7 @@ def main():
 
         if new_months != months:
             st.session_state["months"] = new_months
-            st.experimental_rerun()
+            st.rerun()
 
         # Recherche des tâches par projet
         st.subheader("🔍 Tâches du projet")
