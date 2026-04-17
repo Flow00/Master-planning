@@ -460,6 +460,8 @@ def main():
             fig.update_layout(
                 dragmode="pan",
                 height=chart_height,
+                bargap=0.3,          # 🔥 espace entre les barres (0 = collées, 1 = max espace)
+                bargroupgap=0.1,
                 margin=dict(l=20, r=20, t=40, b=20),
                 yaxis=dict(
                     tickfont=dict(size=12),
