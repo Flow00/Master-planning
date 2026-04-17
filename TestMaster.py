@@ -450,7 +450,7 @@ def main():
 
             # 🔥 Hauteur dynamique : 38px par ligne de projet
             n_proj = len(df_gantt["Projet"].unique())
-            row_height = 24
+            row_height = 18
             chart_height = max(500, n_proj * row_height + 140)
 
             today = date.today()
