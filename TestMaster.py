@@ -211,7 +211,7 @@ def load_purchase_data_all_projects():
             DB, uid, PASSWORD,
             "product.product", "read",
             [product_ids],
-            {"fields": ["invoice_policy"]}
+            {"fields": ["type"]}
         )
         policy_map = {p["id"]: p["invoice_policy"] for p in products}
 
@@ -255,7 +255,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             color = "#FFA000"; rank = 0; orange += 1
         elif dp and dp < today:
             # 🔵 Services en retard → bleu au lieu de gris
-            if policy == "ordered_prepaid":
+            if policy == "service":
                 color = "#1565C0"
             else:
                 color = "#757575"
