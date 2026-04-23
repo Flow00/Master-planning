@@ -114,6 +114,7 @@ def load_projects(_uid, _models, filter_mode="both"):
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
             ('tag_ids', 'in', tag_engineering),
             ('tag_ids', 'in', tag_standard),
+            ('tag_ids', 'in', tag_prolig),
         ]
 
     fields = ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id']
@@ -452,7 +453,7 @@ def main():
             )
         with tcol2:
             filter_standard = st.toggle(
-                "⚪ Standard (sans PRO LIG)",
+                "⚪ Standard (PRO LIG)",
                 value=st.session_state["filter_standard"],
                 key="toggle_standard"
             )
