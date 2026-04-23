@@ -112,8 +112,13 @@ def load_projects(_uid, _models, filter_mode="both"):
         # Engineering (avec ou sans PRO (LIG))
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-            ('tag_ids', 'in', tag_engineering),
-            ('tag_ids', 'in', tag_standard),
+
+            # (Engineering OU Standard)
+            '|',
+                ('tag_ids', 'in', tag_engineering),
+                ('tag_ids', 'in', tag_standard),
+        
+            # ET pro_lig
             ('tag_ids', 'in', tag_prolig),
         ]
 
