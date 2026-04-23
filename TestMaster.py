@@ -397,7 +397,7 @@ def main():
     st.set_page_config(page_title="Master Planning Odoo", layout="wide")
 
     if "filter_standard" not in st.session_state:
-    st.session_state["filter_standard"] = False
+        st.session_state["filter_standard"] = False
     
     st.markdown("""
     <style>
