@@ -525,6 +525,9 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
+            # Trier les projets par numéro (Sxx-xxxxx)
+            df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
+            df_gantt = df_gantt.sort_values(by="code")
             df_gantt["Type détaillé"] = pd.Categorical(
                 df_gantt["Type"],
                 categories=COLOR_ORDER,
