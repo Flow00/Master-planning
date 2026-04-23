@@ -408,10 +408,6 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-    st.markdown(
-            "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
-            unsafe_allow_html=True
-        )
     
 
     try:
@@ -437,6 +433,10 @@ def main():
     col1, col2, col3 = st.columns([1, 4, 1])
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
+        st.markdown(
+        "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+        unsafe_allow_html=True
+    )
     with col2:
         st.markdown(
             "<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
