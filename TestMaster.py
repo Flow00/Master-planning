@@ -407,7 +407,9 @@ def main():
         font-size: 13px !important;
     }
     </style>
-    """, unsafe_allow_html=True)
+    """, 
+    "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+     unsafe_allow_html=True)
 
     try:
         uid, models = connect_odoo()
@@ -429,7 +431,7 @@ def main():
         st.session_state["filter_standard"] = True
 
     # ---------- BANNIÈRE ----------
-    col1, col2, col3, col4 = st.columns([1, 4, 1,1])
+    col1, col2, col3 = st.columns([1, 4, 1])
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
     with col2:
@@ -471,11 +473,7 @@ def main():
             st.session_state["filter_engineering"] = filter_engineering
             st.session_state["filter_standard"] = filter_standard
             st.rerun()
-    with col4:
-        st.markdown(
-            "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
-            unsafe_allow_html=True
-        )
+
     tab1, tab2 = st.tabs(["📅 Planning", "📦 Purchases"])
     # ============================================================
     # 🟦 ONGLET 1 — MASTER PLANNING
