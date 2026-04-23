@@ -335,7 +335,7 @@ def classify_task_type(name):
     if "mise en service" in n or "mes" in n: return "Mise en service"
     if "récept" in n or "recept" in n or "assistance" in n : return "Réception"
     if "transport" in n: return "Transport"
-    if "étude" in n or "etude" in n or "conception" or "plan" in n in n: return "Etude"
+    if "étude" in n or "etude" in n or "conception" in n  or "plan" in n: return "Etude"
     return "Autres"
 
 
