@@ -148,7 +148,7 @@ def load_projects(_uid, _models, filter_mode="both"):
             last_update[pid] = u
 
     filtered = [p for p in projects if last_update.get(p["id"], {}).get("status") != "done"]
-    filtered.sort(key=lambda p: p['display_name'])
+    filtered.sort(key=lambda p: extract_project_code(p['display_name']))
     return filtered
 
 
