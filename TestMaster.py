@@ -213,7 +213,7 @@ def load_purchase_data_all_projects():
             [product_ids],
             {"fields": ["type"]}
         )
-        policy_map = {p["id"]: p["invoice_policy"] for p in products}
+        policy_map = {p["id"]: p["type"] for p in products}
 
     return po_lines, policy_map, buyer_map, po_name_map
 
