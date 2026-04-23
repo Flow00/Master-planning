@@ -331,11 +331,11 @@ def classify_task_type(name):
     if "assembl" in n: return "Assemblage"
     if "cabl" in n or "câbl" in n: return "Câblage"
     if "test" in n: return "Test"
-    if "montage" in n: return "Montage"
+    if "montage" in n or "installation" in n: return "Montage"
     if "mise en service" in n or "mes" in n: return "Mise en service"
-    if "récept" in n or "recept" in n: return "Réception"
+    if "récept" in n or "recept" in n or "assistance" in n : return "Réception"
     if "transport" in n: return "Transport"
-    if "étude" in n or "etude" in n: return "Etude"
+    if "étude" in n or "etude" in n or "conception" or "plan" in n in n: return "Etude"
     return "Autres"
 
 
