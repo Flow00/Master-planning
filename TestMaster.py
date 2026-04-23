@@ -442,7 +442,7 @@ def main():
                 "🔵 Engineering (PRO LIG)",
                 value=st.session_state["filter_engineering"],
                 key="toggle_engineering"
-            
+        )
         filter_standard = st.toggle(
                 "⚪ Standard (PRO LIG)",
                 value=st.session_state["filter_standard"],
