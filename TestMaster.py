@@ -255,7 +255,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             color = "#FFA000"; rank = 0; orange += 1
         elif dp and dp < today:
             # 🔵 Services en retard → bleu au lieu de gris
-            if policy == "service":
+            if policy == "order_prepaid":
                 color = "#1565C0"
             else:
                 color = "#757575"
