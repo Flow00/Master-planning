@@ -407,9 +407,8 @@ def main():
         font-size: 13px !important;
     }
     </style>
-    """, 
+    """, unsafe_allow_html=True)
     "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
-     unsafe_allow_html=True)
 
     try:
         uid, models = connect_odoo()
