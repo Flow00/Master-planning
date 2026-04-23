@@ -437,14 +437,12 @@ def main():
     with col3: 
         # ---------- TOGGLES DE FILTRE ----------
         st.markdown("**Filtres projets**")
-        tcol1, tcol2, tcol3 = st.columns([1, 1, 4])
-        with tcol1:
+        
             filter_engineering = st.toggle(
                 "🔵 Engineering (PRO LIG)",
                 value=st.session_state["filter_engineering"],
                 key="toggle_engineering"
-            )
-        with tcol2:
+            
             filter_standard = st.toggle(
                 "⚪ Standard (PRO LIG)",
                 value=st.session_state["filter_standard"],
