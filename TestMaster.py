@@ -85,6 +85,10 @@ def load_projects(_uid, _models, filter_mode="both"):
         DB, uid, PASSWORD, 'project.tags', 'search',
         [[('name', '=', 'Engineering')]]
     )
+    tag_standard = models.execute_kw(
+        DB, uid, PASSWORD, 'project.tags', 'search',
+        [[('name', '=', 'Standard')]]
+    )
     tag_prolig = models.execute_kw(
         DB, uid, PASSWORD, 'project.tags', 'search',
         [[('name', 'ilike', 'PRO (LIG)')]]
@@ -101,14 +105,14 @@ def load_projects(_uid, _models, filter_mode="both"):
         # Engineering SANS PRO (LIG)
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-            ('tag_ids', 'in', tag_engineering),
-            ('tag_ids', 'not in', tag_prolig),
+            ('tag_ids', 'in', tag_standard),
+            ('tag_ids', 'in', tag_prolig),
         ]
     else:  # "both"
         # Engineering (avec ou sans PRO (LIG))
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-            ('tag_ids', 'in', tag_engineering),
+            ('tag_ids', 'in', [tag_engineering,tag_standard ]),
         ]
 
     fields = ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id']
