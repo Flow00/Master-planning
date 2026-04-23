@@ -319,7 +319,7 @@ COLOR_MAP = {
     "Mise en service": "#EC407A",
     "Réception": "#6D4C41",
     "Transport": "#00ACC1",
-    "Etude": "#F06292",
+    "Etude": "#34ebc6",
     "Autres": "#9E9E9E"
 }
 
@@ -408,7 +408,11 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-    "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+    st.markdown(
+            "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+            unsafe_allow_html=True
+        )
+    
 
     try:
         uid, models = connect_odoo()
@@ -440,7 +444,7 @@ def main():
         )
     with col3: 
         # ---------- TOGGLES DE FILTRE ----------
-        st.markdown("**Filtres projets**")
+        #st.markdown("**Filtres projets**")
         
         filter_engineering = st.toggle(
                 "🔵 Engineering (PRO LIG)",
