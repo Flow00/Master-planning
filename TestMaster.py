@@ -426,7 +426,7 @@ def main():
         st.session_state["filter_standard"] = True
 
     # ---------- BANNIÈRE ----------
-    col1, col2, col3 = st.columns([1, 3, 1])
+    col1, col2, col3, col4 = st.columns([1, 4, 1])
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
     with col2:
@@ -434,19 +434,7 @@ def main():
             "<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
             unsafe_allow_html=True
         )
-    with col3:
-        st.markdown(
-            "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
-            unsafe_allow_html=True
-        )
-
-    tab1, tab2 = st.tabs(["📅 Planning", "📦 Purchases"])
-
-    # ============================================================
-    # 🟦 ONGLET 1 — MASTER PLANNING
-    # ============================================================
-    with tab1:
-
+    with col3: 
         # ---------- TOGGLES DE FILTRE ----------
         st.markdown("**Filtres projets**")
         tcol1, tcol2, tcol3 = st.columns([1, 1, 4])
@@ -482,6 +470,19 @@ def main():
             st.session_state["filter_engineering"] = filter_engineering
             st.session_state["filter_standard"] = filter_standard
             st.rerun()
+    
+    with col4:
+        st.markdown(
+            "<div style='text-align:right;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+            unsafe_allow_html=True
+        )
+    tab1, tab2 = st.tabs(["📅 Planning", "📦 Purchases"])
+    # ============================================================
+    # 🟦 ONGLET 1 — MASTER PLANNING
+    # ============================================================
+    with tab1:
+
+
 
         # 🔥 Projets depuis le cache (avec le mode de filtre)
         projects = load_projects(uid, models, filter_mode)
@@ -655,7 +656,7 @@ def main():
         st.markdown("### 📦 Purchases par projet")
 
         # Projets complets (les deux filtres actifs pour les purchases)
-        projects_all = load_projects(uid, models, "both")
+        projects_all = load_projects(uid, models, filter_mode)
 
         po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
 
