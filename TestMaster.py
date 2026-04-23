@@ -27,10 +27,6 @@ def connect_odoo():
 
 
 def get_top_companies_batch(uid, models, partner_ids):
-    """
-    Charge tous les partenaires en 2 appels RPC au lieu de N.
-    partner_ids : liste de valeurs brutes du champ partner_id (peut être [id, name] ou False)
-    """
     clean_ids = []
     for pid in partner_ids:
         if pid and isinstance(pid, (list, tuple)):
@@ -48,7 +44,6 @@ def get_top_companies_batch(uid, models, partner_ids):
         [clean_ids], {"fields": ["id", "name", "parent_id"]}
     )
 
-    # Récupérer les parents manquants en un seul appel
     parent_ids = list({p["parent_id"][0] for p in partners if p["parent_id"]})
     parent_map = {}
     if parent_ids:
@@ -77,10 +72,12 @@ def extract_project_code(display_name: str) -> str:
 
 
 @st.cache_data(ttl=300)
-def load_projects(_uid, _models):
+def load_projects(_uid, _models, filter_mode="both"):
     """
-    Charge les projets avec un seul batch pour les sociétés.
-    Mis en cache 5 minutes.
+    Charge les projets selon le mode de filtre :
+      - "engineering" : tag Engineering + PRO (LIG)
+      - "standard"    : tag Engineering uniquement (sans PRO (LIG))
+      - "both"        : les deux combinés
     """
     uid, models = _uid, _models
 
@@ -93,25 +90,39 @@ def load_projects(_uid, _models):
         [[('name', 'ilike', 'PRO (LIG)')]]
     )
 
-    domain = [
-        ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-        ('tag_ids', 'in', tag_engineering),
-        ('tag_ids', 'in', tag_prolig),
-    ]
+    if filter_mode == "engineering":
+        # Engineering ET PRO (LIG)
+        domain = [
+            ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
+            ('tag_ids', 'in', tag_engineering),
+            ('tag_ids', 'in', tag_prolig),
+        ]
+    elif filter_mode == "standard":
+        # Engineering SANS PRO (LIG)
+        domain = [
+            ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
+            ('tag_ids', 'in', tag_engineering),
+            ('tag_ids', 'not in', tag_prolig),
+        ]
+    else:  # "both"
+        # Engineering (avec ou sans PRO (LIG))
+        domain = [
+            ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
+            ('tag_ids', 'in', tag_engineering),
+        ]
+
     fields = ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id']
     projects = models.execute_kw(
         DB, uid, PASSWORD, 'project.project', 'search_read',
         [domain], {'fields': fields}
     )
 
-    # 🔥 Batch : 2 appels au lieu de N
     partner_ids = [p["partner_id"] for p in projects]
     company_map = get_top_companies_batch(uid, models, partner_ids)
     for p in projects:
         pid = p["partner_id"][0] if p["partner_id"] else None
         p["company"] = company_map.get(pid, "N/A")
 
-    # Filtrer les projets "done"
     project_ids = [p["id"] for p in projects]
     updates = models.execute_kw(
         DB, uid, PASSWORD,
@@ -157,7 +168,6 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
 
-    # 1) Charger les PO confirmés
     po_data = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order", "search_read",
@@ -172,7 +182,6 @@ def load_purchase_data_all_projects():
     po_name_map = {po["id"]: po["name"] for po in po_data}
     po_ids = [po["id"] for po in po_data]
 
-    # 2) Charger les lignes avec analytic_distribution (et non plus l'account du PO)
     po_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "purchase.order.line", "search_read",
@@ -180,11 +189,10 @@ def load_purchase_data_all_projects():
         {"fields": [
             "name", "product_qty", "qty_received",
             "date_planned", "order_id", "product_id",
-            "analytic_distribution"   # 🔥 distribution analytique par ligne
+            "analytic_distribution"
         ]}
     )
 
-    # 3) Charger invoice_policy
     product_ids = list({l["product_id"][0] for l in po_lines if l.get("product_id")})
     policy_map = {}
     if product_ids:
@@ -211,7 +219,6 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     analytic_str = str(analytic_id)
 
     for l in po_lines:
-        # 🔥 Filtrer via analytic_distribution de la ligne (dict {str(id): pct})
         dist = l.get("analytic_distribution") or {}
         if analytic_str not in dist:
             continue
@@ -228,12 +235,20 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
         else:
             dp = None
 
+        pid = l["product_id"][0] if l.get("product_id") else None
+        policy = policy_map.get(pid, "")
+
         if qty_r >= qty_o:
             color = "#2E7D32"; rank = 3; green += 1
         elif qty_r > 0:
             color = "#FFA000"; rank = 0; orange += 1
         elif dp and dp < today:
-            color = "#757575"; rank = 1; grey += 1
+            # 🔵 Services en retard → bleu au lieu de gris
+            if policy == "service":
+                color = "#1565C0"
+            else:
+                color = "#757575"
+            rank = 1; grey += 1
         else:
             color = "#FFFFFF"; rank = 2; white += 1
 
@@ -246,7 +261,8 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             "Received": qty_r,
             "Planned Date": dp,
             "Color": color,
-            "Rank": rank
+            "Rank": rank,
+            "Policy": policy,
         })
 
     formatted.sort(key=lambda x: x["Rank"])
@@ -278,7 +294,8 @@ def build_weeks_horizon(months=3):
 
 COLOR_ORDER = [
     "Soudure", "Peinture", "Assemblage", "Câblage",
-    "Test", "Montage", "Mise en service", "Réception", "Autres"
+    "Test", "Montage", "Mise en service", "Réception",
+    "Transport", "Etude", "Autres"
 ]
 
 COLOR_MAP = {
@@ -290,6 +307,8 @@ COLOR_MAP = {
     "Montage": "#E53935",
     "Mise en service": "#EC407A",
     "Réception": "#6D4C41",
+    "Transport": "#00ACC1",
+    "Etude": "#F06292",
     "Autres": "#9E9E9E"
 }
 
@@ -304,6 +323,8 @@ def classify_task_type(name):
     if "montage" in n: return "Montage"
     if "mise en service" in n or "mes" in n: return "Mise en service"
     if "récept" in n or "recept" in n: return "Réception"
+    if "transport" in n: return "Transport"
+    if "étude" in n or "etude" in n: return "Etude"
     return "Autres"
 
 
@@ -367,6 +388,10 @@ def main():
     st.markdown("""
     <style>
     .block-container { padding-top: 0.5rem !important; }
+    /* Style pour les toggles de filtre */
+    div[data-testid="stToggle"] > label {
+        font-size: 13px !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -383,6 +408,11 @@ def main():
         st.session_state["months"] = 3
     if "selected_purchase_project_id" not in st.session_state:
         st.session_state["selected_purchase_project_id"] = None
+    # Toggles filtre Gantt — actifs par défaut
+    if "filter_engineering" not in st.session_state:
+        st.session_state["filter_engineering"] = True
+    if "filter_standard" not in st.session_state:
+        st.session_state["filter_standard"] = True
 
     # ---------- BANNIÈRE ----------
     col1, col2, col3 = st.columns([1, 3, 1])
@@ -405,8 +435,45 @@ def main():
     # 🟦 ONGLET 1 — MASTER PLANNING
     # ============================================================
     with tab1:
-        # 🔥 Projets depuis le cache
-        projects = load_projects(uid, models)
+
+        # ---------- TOGGLES DE FILTRE ----------
+        st.markdown("**Filtres projets**")
+        tcol1, tcol2, tcol3 = st.columns([1, 1, 4])
+        with tcol1:
+            filter_engineering = st.toggle(
+                "🔵 Engineering (PRO LIG)",
+                value=st.session_state["filter_engineering"],
+                key="toggle_engineering"
+            )
+        with tcol2:
+            filter_standard = st.toggle(
+                "⚪ Standard (sans PRO LIG)",
+                value=st.session_state["filter_standard"],
+                key="toggle_standard"
+            )
+
+        # Empêcher de tout désactiver
+        if not filter_engineering and not filter_standard:
+            st.warning("⚠️ Au moins un filtre doit être actif.")
+            filter_engineering = True
+
+        # Déterminer le mode de filtre à passer à load_projects
+        if filter_engineering and filter_standard:
+            filter_mode = "both"
+        elif filter_engineering:
+            filter_mode = "engineering"
+        else:
+            filter_mode = "standard"
+
+        # Mettre à jour session_state si changement
+        if (filter_engineering != st.session_state["filter_engineering"] or
+                filter_standard != st.session_state["filter_standard"]):
+            st.session_state["filter_engineering"] = filter_engineering
+            st.session_state["filter_standard"] = filter_standard
+            st.rerun()
+
+        # 🔥 Projets depuis le cache (avec le mode de filtre)
+        projects = load_projects(uid, models, filter_mode)
         project_ids = [p['id'] for p in projects]
 
         months = st.session_state["months"]
@@ -416,16 +483,30 @@ def main():
 
         st.subheader("📊 Gantt")
 
+        # Construction du Gantt avec anti-chevauchement
         gantt_data = []
+        overlap_counter = {}
+
         for t in tasks:
             proj = next((p for p in projects if p['id'] == t['project_id'][0]), None)
             if not proj:
                 continue
+            label = project_label(proj)
+            deadline = t["date_deadline"]
+
+            # Clé unique projet + semaine ISO pour détecter les chevauchements
+            week_key = (label, deadline.isocalendar()[1], deadline.year)
+            count = overlap_counter.get(week_key, 0)
+            overlap_counter[week_key] = count + 1
+
+            # Décaler légèrement la date pour éviter l'empilement
+            offset_days = count * 1  # 1 jour de décalage par conflit
+
             gantt_data.append({
                 "Tâche": t["name"],
-                "Projet": project_label(proj),
-                "Début": t["date_deadline"] - timedelta(days=3),
-                "Fin": t["date_deadline"] + timedelta(days=3),
+                "Projet": label,
+                "Début": deadline - timedelta(days=3) + timedelta(days=offset_days),
+                "Fin": deadline + timedelta(days=3) + timedelta(days=offset_days),
                 "Type": classify_task_type(t["name"])
             })
 
@@ -443,12 +524,13 @@ def main():
                 x_end="Fin",
                 y="Projet",
                 color="Type détaillé",
-                color_discrete_map=COLOR_MAP
+                color_discrete_map=COLOR_MAP,
+                hover_name="Tâche",
+                hover_data={"Début": True, "Fin": True, "Type détaillé": True, "Projet": False}
             )
 
             fig.update_yaxes(autorange="reversed")
 
-            # 🔥 Hauteur dynamique : 38px par ligne de projet
             n_proj = len(df_gantt["Projet"].unique())
             row_height = 18
             chart_height = max(500, n_proj * row_height + 140)
@@ -460,12 +542,11 @@ def main():
             fig.update_layout(
                 dragmode="pan",
                 height=chart_height,
-                bargap=0.3,          # 🔥 espace entre les barres (0 = collées, 1 = max espace)
+                bargap=0.3,
                 bargroupgap=0.1,
                 margin=dict(l=20, r=20, t=40, b=20),
                 yaxis=dict(
                     tickfont=dict(size=12),
-                    # 🔥 Séparateurs horizontaux entre les projets
                     showgrid=True,
                     gridcolor="rgba(180,180,180,0.18)",
                     gridwidth=1,
@@ -484,7 +565,7 @@ def main():
                 )
             )
 
-            # Ligne "aujourd'hui" pleine blanche
+            # Ligne "aujourd'hui"
             fig.add_vline(
                 x=today,
                 line_width=2,
@@ -492,10 +573,9 @@ def main():
                 opacity=0.9
             )
 
-            # 🔥 Barres verticales pointillées au 1er de chaque mois
+            # Barres verticales pointillées au 1er de chaque mois
             cur = date(today.year, today.month, 1)
             while True:
-                # Avancer d'un mois
                 if cur.month == 12:
                     cur = date(cur.year + 1, 1, 1)
                 else:
@@ -563,23 +643,22 @@ def main():
     with tab2:
         st.markdown("### 📦 Purchases par projet")
 
-        # 🔥 Projets depuis le cache (même appel que tab1, pas de doublon)
-        projects = load_projects(uid, models)
+        # Projets complets (les deux filtres actifs pour les purchases)
+        projects_all = load_projects(uid, models, "both")
 
-        # 🔥 Toutes les purchases en un seul batch (cached)
         po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
 
         purchase_data = {}
-        for p in projects:
+        for p in projects_all:
             summary, lines = get_purchase_for_project(
                 p, po_lines, policy_map, buyer_map, po_name_map
             )
             purchase_data[p['id']] = {"summary": summary, "lines": lines}
 
         cols_per_row = 6
-        for i in range(0, len(projects), cols_per_row):
+        for i in range(0, len(projects_all), cols_per_row):
             cols = st.columns(cols_per_row)
-            for col, p in zip(cols, projects[i:i + cols_per_row]):
+            for col, p in zip(cols, projects_all[i:i + cols_per_row]):
                 with col:
                     client = p["company"]
                     desc_clean = clean_description_from_display_name(p['display_name'])
@@ -637,7 +716,7 @@ def main():
         if selected_purchase_project_id is None:
             st.info("Clique sur une vignette projet pour voir le détail des lignes d'achat.")
         else:
-            p = next((p for p in projects if p['id'] == selected_purchase_project_id), None)
+            p = next((p for p in projects_all if p['id'] == selected_purchase_project_id), None)
             if p is None:
                 st.warning("Projet introuvable.")
             else:
@@ -655,6 +734,8 @@ def main():
                     st.markdown(f"**Total lignes : {len(lines)}**")
                     for row in lines:
                         date_display = row['Planned Date'].strftime("%d-%m-%Y") if row['Planned Date'] else "—"
+                        # Texte blanc sur fond bleu foncé, noir sur les autres couleurs
+                        text_color_line = "white" if row['Color'] in ("#1565C0", "#2E7D32", "#757575") else "black"
                         st.markdown(
                             f"""
                             <div style="
@@ -664,7 +745,7 @@ def main():
                                 margin-bottom:5px;
                                 border:1px solid #555;
                                 font-size:14px;
-                                color:black;
+                                color:{text_color_line};
                                 display:grid;
                                 grid-template-columns: 90px 190px 1fr 80px 90px 110px;
                                 column-gap:12px;
