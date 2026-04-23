@@ -396,6 +396,9 @@ def project_label(p):
 def main():
     st.set_page_config(page_title="Master Planning Odoo", layout="wide")
 
+    if "filter_standard" not in st.session_state:
+    st.session_state["filter_standard"] = False
+    
     st.markdown("""
     <style>
     .block-container { padding-top: 0.5rem !important; }
@@ -426,7 +429,7 @@ def main():
         st.session_state["filter_standard"] = True
 
     # ---------- BANNIÈRE ----------
-    col1, col2, col3, col4 = st.columns([1, 3, 1,1])
+    col1, col2, col3, col4 = st.columns([1, 4, 1,1])
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
     with col2:
