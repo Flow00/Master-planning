@@ -294,10 +294,11 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
 @st.cache_data(ttl=300)
 def load_analytics_for_projects(_uid, _models, project_list):
     """
-    Pour chaque projet, calcule depuis les comptes analytiques :
-      - CA total   : somme des lignes SO confirmées liées au compte
-      - Dépenses   : somme des lignes analytiques négatives (charges)
-      - Facturé    : montant déjà facturé (qty_invoiced * price_unit sur les SO)
+    Logique basée entièrement sur account.analytic.line :
+      - Dépenses   : somme des montants négatifs (charges, achats)
+      - Facturé    : somme des montants positifs (revenus déjà facturés)
+      - CA total   : montant total de la vente liée au projet
+                     → cherché via sale.order dont le nom matche le code projet (Sxx-xxxxx)
       - À facturer : CA total - Facturé
       - Marge C    : CA total - Dépenses
     """
@@ -311,7 +312,7 @@ def load_analytics_for_projects(_uid, _models, project_list):
     if not analytic_ids:
         return {}
 
-    # --- Lignes analytiques réelles (charges) ---
+    # ── 1. Toutes les lignes analytiques des projets ──────────────────────────
     analytic_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
@@ -319,42 +320,49 @@ def load_analytics_for_projects(_uid, _models, project_list):
         {"fields": ["account_id", "amount"]}
     )
 
-    spend_map = {}
+    depenses_map = {}   # analytic_id → total charges (montants négatifs, stockés positifs)
+    facture_map  = {}   # analytic_id → total déjà facturé (montants positifs)
     for line in analytic_lines:
         aid = line["account_id"][0]
         amt = line["amount"]
         if amt < 0:
-            spend_map[aid] = spend_map.get(aid, 0.0) + abs(amt)
+            depenses_map[aid] = depenses_map.get(aid, 0.0) + abs(amt)
+        elif amt > 0:
+            facture_map[aid]  = facture_map.get(aid, 0.0) + amt
 
-    # --- Budget vendu + facturé : via sale.order.line ---
-    so_lines = models.execute_kw(
-        DB, uid, PASSWORD,
-        "sale.order.line", "search_read",
-        [[
-            ("order_id.state", "in", ["sale", "done"]),
-            ("analytic_distribution", "!=", False),
-        ]],
-        {"fields": ["price_subtotal", "analytic_distribution",
-                    "qty_invoiced", "price_unit", "product_uom_qty"]}
-    )
+    # ── 2. CA total via sale.order : on cherche les SO dont le nom contient
+    #       le code projet (Sxx-xxxxx) et dont le statut est confirmé ─────────
+    # Récupérer tous les codes projets
+    code_to_proj = {}
+    for p in project_list:
+        code = extract_project_code(p.get("display_name", ""))
+        if code:
+            code_to_proj[code] = p
 
-    sold_map = {}
-    invoiced_map = {}
-    for sl in so_lines:
-        dist = sl.get("analytic_distribution") or {}
-        for aid_str, pct in dist.items():
-            try:
-                aid = int(aid_str)
-            except ValueError:
+    ca_map = {}  # analytic_id → CA total HT
+
+    if code_to_proj:
+        # Chercher tous les SO confirmés en une seule requête
+        all_so = models.execute_kw(
+            DB, uid, PASSWORD,
+            "sale.order", "search_read",
+            [[("state", "in", ["sale", "done"])]],
+            {"fields": ["id", "name", "amount_untaxed"]}
+        )
+
+        for so in all_so:
+            # Extraire le code depuis le nom du SO (ex. "S24-01234 - Description")
+            so_code = extract_project_code(so["name"])
+            if not so_code:
                 continue
-            if aid not in analytic_ids:
+            proj = code_to_proj.get(so_code)
+            if not proj or not proj.get("analytic_account_id"):
                 continue
-            ratio = pct / 100.0
-            sold_map[aid] = sold_map.get(aid, 0.0) + sl["price_subtotal"] * ratio
-            already_inv = sl["qty_invoiced"] * sl["price_unit"]
-            invoiced_map[aid] = invoiced_map.get(aid, 0.0) + already_inv * ratio
+            aid = proj["analytic_account_id"][0]
+            # Additionner si plusieurs SO pour le même projet
+            ca_map[aid] = ca_map.get(aid, 0.0) + so["amount_untaxed"]
 
-    # --- Résultat par projet ---
+    # ── 3. Résultat par projet ────────────────────────────────────────────────
     result = {}
     for p in project_list:
         if not p.get("analytic_account_id"):
@@ -362,9 +370,9 @@ def load_analytics_for_projects(_uid, _models, project_list):
             continue
         aid = p["analytic_account_id"][0]
 
-        ca_total   = sold_map.get(aid, 0.0)
-        depenses   = spend_map.get(aid, 0.0)
-        facture    = invoiced_map.get(aid, 0.0)
+        ca_total   = ca_map.get(aid, 0.0)
+        depenses   = depenses_map.get(aid, 0.0)
+        facture    = facture_map.get(aid, 0.0)
         a_facturer = max(ca_total - facture, 0.0)
         marge_c    = ca_total - depenses
         marge_pct  = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
