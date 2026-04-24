@@ -428,16 +428,6 @@ def load_analytics_data(_uid, _models, project_list):
         acc_id = ga[0]
         code = account_code_map.get(acc_id, "")
 
-        if not code:
-            print('No code')
-            continue
-        print("code")
-        debug = True
-        debug_rows = []
-        # DEBUG : valeurs par défaut
-        debug_code = code or "NO_CODE"
-        debug_class = "IGNORED"
-        
         # --- Dépenses (classe 6) ---
         if code.startswith("6"):
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
@@ -460,21 +450,8 @@ def load_analytics_data(_uid, _models, project_list):
         
         # --- Comptes ignorés ---
         else:
-            debug_class = "IGNORED"
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
         
-        # Enregistrer la ligne dans le debug
-        if debug:
-            debug_rows.append({
-                "analytic_id": aid,
-                "amount": amt,
-                "account_id": acc_id,
-                "code": debug_code,
-                "classification": debug_class
-            })
-
-        # --- Comptes 3/4/5 ignorés ---
-        else:
-            continue
 
     # =========================================================
     # 4) CA via sale.order — 1 SEUL APPEL
@@ -553,11 +530,7 @@ def load_analytics_data(_uid, _models, project_list):
 
             "is_closed":   p.get("is_closed", False),
         }
-
-        if debug:
-            st.subheader("🔍 DEBUG ANALYTIQUE")
-            st.dataframe(pd.DataFrame(debug_rows))
-    return result, , debug_rows
+    return result
 
 
 
@@ -1282,8 +1255,6 @@ def main():
     <div class="footer">C Flow - Powered by Olsen-Engineering</div>
     """, unsafe_allow_html=True)
 
-    analytics, debug = load_analytics_data(uid, models, projects_ana)
-    st.dataframe(debug)
 
 if __name__ == "__main__":
     main()
