@@ -432,13 +432,45 @@ def load_analytics_data(_uid, _models, project_list):
             print('No code')
             continue
         print("code")
-        # --- Comptes de dépense (classe 6) ---
-        if code.startswith("6") or code.startswith("3"):
+        debug = True
+        debug_rows = []
+        # DEBUG : valeurs par défaut
+        debug_code = code or "NO_CODE"
+        debug_class = "IGNORED"
+        
+        # --- Dépenses (classe 6) ---
+        if code.startswith("6"):
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
-
-        # --- Comptes de revenu (classe 7) ---
-        elif code.startswith("7") or code.startswith("4"):
+            debug_class = "DEPENSE (6)"
+        
+        # --- Revenus (classe 7) ---
+        elif code.startswith("7"):
             facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
+            debug_class = "FACTURE (7)"
+        
+        # --- Comptes 3 = acomptes fournisseurs (dépenses) ---
+        elif code.startswith("3"):
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
+            debug_class = "DEPENSE (3)"
+        
+        # --- Comptes 4 = acomptes clients (revenus) ---
+        elif code.startswith("4"):
+            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
+            debug_class = "FACTURE (4)"
+        
+        # --- Comptes ignorés ---
+        else:
+            debug_class = "IGNORED"
+        
+        # Enregistrer la ligne dans le debug
+        if debug:
+            debug_rows.append({
+                "analytic_id": aid,
+                "amount": amt,
+                "account_id": acc_id,
+                "code": debug_code,
+                "classification": debug_class
+            })
 
         # --- Comptes 3/4/5 ignorés ---
         else:
@@ -522,6 +554,9 @@ def load_analytics_data(_uid, _models, project_list):
             "is_closed":   p.get("is_closed", False),
         }
 
+        if debug:
+        st.subheader("🔍 DEBUG ANALYTIQUE")
+        st.dataframe(pd.DataFrame(debug_rows))
     return result
 
 
