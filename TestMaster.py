@@ -995,12 +995,14 @@ def main():
         # Projets avec Cloturés inclus, triés par code décroissant
         projects_ana = load_projects_with_closed(uid, models, filter_mode)
         # ❌ Exclure les projets dont le compte analytique est "PROJETS (LIG)"
+        bad_accounts = ["dépannage (liège)", "projets (lig)"]
+
         projects_ana = [
             p for p in projects_ana
             if not (
                 p.get("analytic_account_id")
-                and p["analytic_account_id"][1] in ["Dépannage (Liège)", "Projets (LIG)"]
-                ):
+                and p["analytic_account_id"][1].lower() in bad_accounts
+            )
         ]
         with st.spinner("Chargement des données analytiques…"):
             analytics    = load_analytics_for_projects(uid, models, projects_ana)
