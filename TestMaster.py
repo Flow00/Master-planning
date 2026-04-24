@@ -146,32 +146,43 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
         ('date_deadline', '!=', False),
         ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)']),
     ]
-    # Récupère aussi date_assign (date de début) et stage pour savoir si terminée
-    fields = ['id', 'name', 'project_id', 'date_deadline', 'stage_id', 'date_last_stage_update']
+    # On récupère state + stage_id pour couvrir toutes les versions Odoo
+    fields = ['id', 'name', 'project_id', 'date_deadline', 'state', 'stage_id', 'state']
     tasks = models.execute_kw(
         DB, uid, PASSWORD, 'project.task', 'search_read',
         [domain], {'fields': fields}
     )
 
-    # Récupère les noms des étapes "done" pour ce modèle
-    done_stage_ids = models.execute_kw(
-        DB, uid, PASSWORD, 'project.task.type', 'search',
-        [[('name', 'ilike', 'done')]],
-    )
-    # Fallback : on cherche aussi "terminé", "fini", "closed"
-    done_stage_ids += models.execute_kw(
-        DB, uid, PASSWORD, 'project.task.type', 'search',
-        [[('name', 'in', ['Terminé', 'Terminée', 'Fini', 'Finie', 'Done', 'Closed', 'Cloturé'])]],
-    )
-    done_stage_set = set(done_stage_ids)
+    # Récupère les stages marqués "is_closed" (= tâche terminée dans Odoo)
+    all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
+    closed_stages = set()
+    if all_stage_ids:
+        stages = models.execute_kw(
+            DB, uid, PASSWORD, 'project.task.type', 'read',
+            [all_stage_ids], {'fields': ['id', 'name']}
+        )
+        closed_stages = {s['id'] for s in stages if s.get('is_closed')}
+        # Fallback sur le nom si is_closed n'existe pas
+        name_done = {'done', 'terminé', 'terminée', 'fini', 'finie', 'closed', 'annulé', 'cancelled'}
+        for s in stages:
+            if s.get('name', '').lower().strip() in name_done:
+                closed_stages.add(s['id'])
 
     for t in tasks:
         raw = t['date_deadline']
         if raw:
             raw = raw.split(" ")[0]
             t['date_deadline'] = datetime.strptime(raw, '%Y-%m-%d').date()
-        stage = t.get('stage_id')
-        t['is_done'] = bool(stage and stage[0] in done_stage_set)
+
+        state = str(t.get('state') or '').lower()
+        stage_id = t['stage_id'][0] if t.get('stage_id') else None
+
+        # Odoo 14: 'done'/'cancelled'
+        # Odoo 16+: '1_done', '04_cancel', '1_canceled' etc.
+        is_done_state = any(kw in state for kw in ('done', 'cancel', 'annul', 'clos'))
+        is_done_stage = stage_id in closed_stages
+
+        t['is_done'] = is_done_state or is_done_stage
     return tasks
 
 
@@ -360,17 +371,15 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_all_analytics(_uid, _models, project_list):
     """
-    UN SEUL appel account.analytic.line + UN SEUL appel sale.order.
-    Retourne :
-      - analytics_summary  : dict[project_id] → métriques (bilan + année)
-      - df_monthly         : DataFrame mensuel 12 mois
-    
-    Fix notes de crédit :
-      - Classe 6 (charges) : montant négatif = dépense réelle, positif = avoir fournisseur (réduit dépenses)
-      - Classe 7 (produits) : montant positif = revenu réel, négatif = avoir client (réduit revenus)
-      → On prend le montant TEL QUEL avec son signe, c'est Odoo qui gère déjà les NC en négatif.
-      → On NE classe PAS les comptes 3/4 (acomptes) : ils sont transitoires et ne reflètent
-        pas encore le CA ou la dépense définitive. Les ignorer évite les doubles comptes.
+    Sources fiables :
+      - DEPENSES  : account.analytic.line sur comptes analytiques des projets,
+                    filtrées sur move_type in (in_invoice) et category != timesheet.
+                    Les timesheets (sans compte GL) sont prises telles quelles (montant négatif).
+                    Les NC fournisseur (in_refund) sont EXCLUES : elles réduisent la dette,
+                    pas la dépense analytique réelle.
+      - FACTURE   : account.move (out_invoice) liées aux SO du projet, état posted,
+                    MOINS les avoirs (out_refund). Source la plus fiable.
+      - CA        : sale.order confirmées, comme avant.
     """
     uid, models = _uid, _models
 
@@ -387,79 +396,66 @@ def load_all_analytics(_uid, _models, project_list):
     year_end   = f"{year_now}-12-31"
     date_12m   = (date.today().replace(day=1) - timedelta(days=365)).strftime("%Y-%m-%d")
 
-    # ── 1) UN SEUL appel analytique (sans filtre date pour le bilan complet) ──
+    # ── 1) Lignes analytiques — dépenses uniquement ──
+    # On prend TOUTES les lignes analytiques (y compris timesheets sans compte GL)
     all_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount", "general_account_id", "date"], "limit": 0}
+        {"fields": ["account_id", "amount", "general_account_id", "date", "move_line_id"], "limit": 0}
     )
 
-    # ── 2) Chargement batch des comptes financiers ──
+    # Chargement batch des codes de comptes GL
     account_ids_set = {
         l["general_account_id"][0]
         for l in all_lines
         if l.get("general_account_id")
     }
     account_code_map = {}
-    account_ids_list = list(account_ids_set)
-    batch_size = 200
-    for i in range(0, len(account_ids_list), batch_size):
-        sub = account_ids_list[i:i + batch_size]
-        accounts = models.execute_kw(
-            DB, uid, PASSWORD,
-            "account.account", "read",
-            [sub],
-            {"fields": ["id", "code"]}
-        )
-        for a in accounts:
+    for i in range(0, len(account_ids_set := list(account_ids_set)), 200):
+        sub = account_ids_set[i:i + 200]
+        for a in models.execute_kw(DB, uid, PASSWORD, "account.account", "read",
+                [sub], {"fields": ["id", "code"]}):
             account_code_map[a["id"]] = a["code"]
 
-    # ── 3) Classification & agrégation ──
-    # Par projet : all-time
-    depenses_map  = {}   # charges (classe 6) — montant négatif en Odoo
-    revenus_map   = {}   # produits (classe 7) — montant positif en Odoo
-
-    # Par projet : année courante
+    depenses_map       = {}
     depenses_annee_map = {}
-    revenus_annee_map  = {}
-
-    # Mensuel (12 derniers mois) : toutes classes 6 + 7
-    monthly_records = []
+    monthly_dep        = []
 
     for line in all_lines:
-        if not line.get("account_id") or not line.get("general_account_id"):
+        if not line.get("account_id"):
+            continue
+        aid = line["account_id"][0]
+        amt = line["amount"]
+        d   = line.get("date", "")
+
+        if not line.get("general_account_id"):
+            # Timesheet / ligne sans compte GL → négatif = coût
+            if amt < 0:
+                v = -amt
+                depenses_map[aid]       = depenses_map.get(aid, 0.0)       + v
+                if year_start <= d <= year_end:
+                    depenses_annee_map[aid] = depenses_annee_map.get(aid, 0.0) + v
+                if d >= date_12m:
+                    monthly_dep.append({"aid": aid, "date": d, "val": v})
             continue
 
-        aid  = line["account_id"][0]
-        amt  = line["amount"]
         code = account_code_map.get(line["general_account_id"][0], "")
-        d    = line.get("date", "")
 
-        # ── Classification stricte : 6 = charge, 7 = produit, reste ignoré ──
+        # Classe 6 = charges fournisseur.
+        # En Odoo BE le montant analytique est NEGATIF pour une facture fournisseur
+        # et POSITIF pour une note de crédit fournisseur.
+        # → On prend -amt : facture → positif (dépense), NC → négatif (réduction). Correct.
         if code.startswith("6"):
-            # En Odoo BE, les charges arrivent en négatif sur le compte analytique.
-            # On prend -amt pour avoir un nombre positif = montant dépensé.
-            # Les notes de crédit fournisseur arrivent en positif → -amt sera négatif
-            # → elles réduisent bien les dépenses. ✓
-            depenses_map[aid]  = depenses_map.get(aid, 0.0)  + (-amt)
+            v = -amt
+            depenses_map[aid]       = depenses_map.get(aid, 0.0)       + v
             if year_start <= d <= year_end:
-                depenses_annee_map[aid] = depenses_annee_map.get(aid, 0.0) + (-amt)
+                depenses_annee_map[aid] = depenses_annee_map.get(aid, 0.0) + v
             if d >= date_12m:
-                monthly_records.append({"aid": aid, "date": d, "type": "depense", "val": -amt})
+                monthly_dep.append({"aid": aid, "date": d, "val": v})
+        # Autres classes (4, 7…) ignorées ici — les revenus viennent des account.move
 
-        elif code.startswith("7"):
-            # Produits : positif = revenu. NC client = négatif → réduit le revenu. ✓
-            revenus_map[aid]  = revenus_map.get(aid, 0.0)  + amt
-            if year_start <= d <= year_end:
-                revenus_annee_map[aid] = revenus_annee_map.get(aid, 0.0) + amt
-            if d >= date_12m:
-                monthly_records.append({"aid": aid, "date": d, "type": "revenu", "val": amt})
-
-        # Comptes 3, 4, 4xx transitoires → IGNORÉS volontairement
-        # (acomptes : pas encore du CA ni de la dépense définitive)
-
-    # ── 4) CA via sale.order ──
+    # ── 2) CA via sale.order ──
     code_to_proj = {}
     for p in project_list:
         code = extract_project_code(p.get("display_name", ""))
@@ -468,27 +464,104 @@ def load_all_analytics(_uid, _models, project_list):
 
     ca_all_map   = {}
     ca_annee_map = {}
+    so_by_code   = {}  # code → liste de SO ids (pour retrouver les factures)
 
     if code_to_proj:
         all_so = models.execute_kw(
             DB, uid, PASSWORD,
             "sale.order", "search_read",
             [[("state", "in", ["sale", "done"])]],
-            {"fields": ["id", "name", "amount_untaxed", "date_order"], "limit": 0}
+            {"fields": ["id", "name", "amount_untaxed", "date_order", "invoice_ids"], "limit": 0}
         )
         for so in all_so:
             so_code = extract_project_code(so["name"])
-            if not so_code:
+            if not so_code or so_code not in code_to_proj:
                 continue
-            proj = code_to_proj.get(so_code)
-            if not proj or not proj.get("analytic_account_id"):
+            proj = code_to_proj[so_code]
+            if not proj.get("analytic_account_id"):
                 continue
             aid = proj["analytic_account_id"][0]
             amt = so["amount_untaxed"]
-            ca_all_map[aid] = ca_all_map.get(aid, 0.0) + amt
+            ca_all_map[aid]  = ca_all_map.get(aid, 0.0)  + amt
             do = (so.get("date_order") or "")[:10]
             if year_start <= do <= year_end:
                 ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
+            # Collecte les invoice_ids par compte analytique
+            for inv_id in (so.get("invoice_ids") or []):
+                so_by_code.setdefault(aid, []).append(inv_id)
+
+    # ── 3) Montant facturé via account.move (source fiable) ──
+    # out_invoice = facture client  → montant positif
+    # out_refund  = avoir client    → montant négatif (à soustraire)
+    facture_all_map   = {}
+    facture_annee_map = {}
+    monthly_rev       = []
+
+    all_inv_ids = list({inv_id for ids in so_by_code.values() for inv_id in ids})
+
+    if all_inv_ids:
+        # On lit par batch de 200
+        all_moves = []
+        for i in range(0, len(all_inv_ids), 200):
+            sub = all_inv_ids[i:i + 200]
+            batch = models.execute_kw(
+                DB, uid, PASSWORD,
+                "account.move", "read",
+                [sub],
+                {"fields": ["id", "move_type", "state", "amount_untaxed", "invoice_date"]}
+            )
+            all_moves.extend(batch)
+
+        # Construire un map inv_id → analytic_account_id
+        # On repasse par so_by_code en inversant
+        inv_to_aid = {}
+        for aid, inv_ids in so_by_code.items():
+            for inv_id in inv_ids:
+                inv_to_aid[inv_id] = aid
+
+        for move in all_moves:
+            if move["state"] != "posted":
+                continue
+            aid = inv_to_aid.get(move["id"])
+            if not aid:
+                continue
+            mv_type = move["move_type"]
+            amt     = move["amount_untaxed"]
+            inv_d   = (move.get("invoice_date") or "")[:10]
+
+            if mv_type == "out_invoice":
+                sign = +1
+            elif mv_type == "out_refund":
+                sign = -1   # avoir = réduit le facturé
+            else:
+                continue
+
+            facture_all_map[aid]  = facture_all_map.get(aid, 0.0)  + sign * amt
+            if year_start <= inv_d <= year_end:
+                facture_annee_map[aid] = facture_annee_map.get(aid, 0.0) + sign * amt
+            if inv_d >= date_12m:
+                monthly_rev.append({"aid": aid, "date": inv_d, "val": sign * amt})
+
+    # ── 4) DataFrame mensuel ──
+    records = []
+    for r in monthly_dep:
+        records.append({"aid": r["aid"], "date": r["date"], "type": "depense", "val": r["val"]})
+    for r in monthly_rev:
+        records.append({"aid": r["aid"], "date": r["date"], "type": "revenu",  "val": r["val"]})
+
+    if not records:
+        df_monthly = pd.DataFrame()
+    else:
+        df_m = pd.DataFrame(records)
+        df_m["Mois"] = pd.to_datetime(df_m["date"]).dt.to_period("M").dt.to_timestamp()
+        dep_agg = df_m[df_m["type"] == "depense"].groupby("Mois")["val"].sum().rename("Depenses")
+        rev_agg = df_m[df_m["type"] == "revenu" ].groupby("Mois")["val"].sum().rename("CA")
+        all_months = pd.date_range(start=date_12m, end=date.today().strftime("%Y-%m-%d"), freq="MS")
+        df_monthly = (pd.DataFrame({"Mois": all_months})
+                      .merge(dep_agg.reset_index(), on="Mois", how="left")
+                      .merge(rev_agg.reset_index(), on="Mois", how="left")
+                      .fillna(0))
+        df_monthly = df_monthly.rename(columns={"Depenses": "Dépenses"})
 
     # ── 5) Synthèse par projet ──
     analytics_summary = {}
@@ -496,66 +569,39 @@ def load_all_analytics(_uid, _models, project_list):
         if not p.get("analytic_account_id"):
             analytics_summary[p["id"]] = None
             continue
-
         aid = p["analytic_account_id"][0]
 
         ca_total  = ca_all_map.get(aid, 0.0)
         ca_annee  = ca_annee_map.get(aid, 0.0)
         dep_all   = depenses_map.get(aid, 0.0)
-        rev_all   = revenus_map.get(aid, 0.0)   # = ce qui est facturé (classe 7)
+        dep_annee = depenses_annee_map.get(aid, 0.0)
+        fact_all  = facture_all_map.get(aid, 0.0)
+        fact_ann  = facture_annee_map.get(aid, 0.0)
 
-        # À facturer = CA commandé – déjà facturé (ne peut pas être négatif logiquement,
-        # mais on laisse passer pour détecter les sur-facturations)
-        a_facturer      = ca_total - rev_all
-        marge_c         = ca_total - dep_all
-        marge_pct       = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
-
-        dep_annee       = depenses_annee_map.get(aid, 0.0)
-        rev_annee       = revenus_annee_map.get(aid, 0.0)
-        marge_attendue  = ca_annee - dep_annee
-        marge_att_pct   = (marge_attendue / ca_annee * 100) if ca_annee > 0 else 0.0
-        a_fac_annee     = ca_annee - rev_annee
+        # À facturer = CA commandé - déjà facturé
+        a_facturer    = ca_total  - fact_all
+        a_fac_annee   = ca_annee  - fact_ann
+        marge_c       = ca_total  - dep_all
+        marge_pct     = (marge_c  / ca_total  * 100) if ca_total  > 0 else 0.0
+        marge_att     = ca_annee  - dep_annee
+        marge_att_pct = (marge_att / ca_annee * 100)  if ca_annee > 0 else 0.0
 
         analytics_summary[p["id"]] = {
             "ca_annee":           ca_annee,
             "depenses_annee":     dep_annee,
-            "marge_attendue":     marge_attendue,
+            "marge_attendue":     marge_att,
             "marge_attendue_pct": marge_att_pct,
             "a_facturer_annee":   a_fac_annee,
-
-            "ca_total":    ca_total,
-            "facture_all": rev_all,
-            "a_facturer":  a_facturer,
-            "depenses_all": dep_all,
-            "marge_c":     marge_c,
-            "marge_pct":   marge_pct,
-
-            "is_closed":   p.get("is_closed", False),
+            "ca_total":           ca_total,
+            "facture_all":        fact_all,
+            "a_facturer":         a_facturer,
+            "depenses_all":       dep_all,
+            "marge_c":            marge_c,
+            "marge_pct":          marge_pct,
+            "is_closed":          p.get("is_closed", False),
         }
 
-    # ── 6) DataFrame mensuel ──
-    if not monthly_records:
-        df_monthly = pd.DataFrame()
-    else:
-        df_m = pd.DataFrame(monthly_records)
-        df_m["Mois"] = pd.to_datetime(df_m["date"]).dt.to_period("M").dt.to_timestamp()
-
-        dep_agg = df_m[df_m["type"] == "depense"].groupby("Mois")["val"].sum().rename("Dépenses")
-        rev_agg = df_m[df_m["type"] == "revenu"].groupby("Mois")["val"].sum().rename("CA")
-
-        all_months = pd.date_range(start=date_12m, end=date.today().strftime("%Y-%m-%d"), freq="MS")
-        df_monthly = pd.DataFrame({"Mois": all_months})
-        df_monthly = (df_monthly
-                      .merge(dep_agg.reset_index(), on="Mois", how="left")
-                      .merge(rev_agg.reset_index(), on="Mois", how="left")
-                      .fillna(0))
-
     return analytics_summary, df_monthly
-
-
-# ============================================================
-# 🔧 GANTT HELPERS
-# ============================================================
 
 def build_weeks_horizon(months=3):
     start = date.today()
@@ -754,195 +800,114 @@ def main():
         start_view = today
         end_view = today + timedelta(days=30 * months)
 
-        # ── Construire le Gantt avec gestion des overlaps par quinconce ──
+        # ── Construction Gantt (logique originale) ──
         gantt_data = []
+        overlap_counter = {}
 
-        # Grouper par (projet, semaine_ISO) pour détecter les overlaps
-        from collections import defaultdict
-        week_task_groups = defaultdict(list)
         for t in tasks:
             proj = next((p for p in projects if p['id'] == t['project_id'][0]), None)
             if not proj:
                 continue
             label = project_label(proj)
             deadline = t["date_deadline"]
-            week_num = deadline.isocalendar()[1]
-            week_year = deadline.year
-            week_task_groups[(label, week_year, week_num)].append(t)
 
-        for (label, week_year, week_num), group_tasks in week_task_groups.items():
-            n = len(group_tasks)
-            for idx, t in enumerate(group_tasks):
-                deadline = t["date_deadline"]
-                task_type = classify_task_type(t["name"])
+            week_key = (label, deadline.isocalendar()[1], deadline.year)
+            count = overlap_counter.get(week_key, 0)
+            overlap_counter[week_key] = count + 1
+            offset_days = count * 1
 
-                if n == 1:
-                    # Tâche seule : barre normale centrée
-                    y_base  = label
-                    y_label = label
-                    start   = deadline - timedelta(days=3)
-                    end_d   = deadline + timedelta(days=3)
-                else:
-                    # Overlaps : on crée des sous-lignes alternées
-                    # On utilise un suffixe pour créer des "sous-lignes" distinctes
-                    # Pair → "haut", Impair → "bas"
-                    sub = "▲" if idx % 2 == 0 else "▽"
-                    y_label = f"{label} {sub}"
-                    # Décalage horizontal léger pour quinconce visuel
-                    offset = timedelta(days=1) if idx % 2 == 1 else timedelta(days=0)
-                    start   = deadline - timedelta(days=2) + offset
-                    end_d   = deadline + timedelta(days=2) + offset
-
-                gantt_data.append({
-                    "Tâche":    t["name"],
-                    "Projet":   label,
-                    "Y":        y_label,
-                    "Début":    start,
-                    "Fin":      end_d,
-                    "Type":     task_type,
-                    "is_done":  t.get("is_done", False),
-                    "deadline": deadline,
-                })
+            gantt_data.append({
+                "Tache":    t["name"],
+                "Projet":   label,
+                "Debut":    deadline - timedelta(days=3) + timedelta(days=offset_days),
+                "Fin":      deadline + timedelta(days=3) + timedelta(days=offset_days),
+                "Type":     classify_task_type(t["name"]),
+                "is_done":  t.get("is_done", False),
+                "deadline": str(deadline),
+            })
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
             df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
-            df_gantt = df_gantt.sort_values(by=["code", "Y"])
-
-            # Ordre des Y : projets triés par code, sous-lignes groupées
-            y_order = df_gantt.drop_duplicates("Y").sort_values(["code", "Y"])["Y"].tolist()
-            y_order_rev = list(reversed(y_order))
-
-            df_gantt["Type détaillé"] = pd.Categorical(
-                df_gantt["Type"],
-                categories=COLOR_ORDER,
-                ordered=True
+            df_gantt = df_gantt.sort_values(by="code")
+            df_gantt["Type detail"] = pd.Categorical(
+                df_gantt["Type"], categories=COLOR_ORDER, ordered=True
             )
 
-            # ── Séparer tâches normales et terminées ──
-            df_normal = df_gantt[~df_gantt["is_done"]].copy()
-            df_done   = df_gantt[df_gantt["is_done"]].copy()
+            # Couleur : grise si terminee, sinon couleur normale
+            def row_color(row):
+                if row["is_done"]:
+                    return "rgba(110,110,110,0.40)"
+                return COLOR_MAP[row["Type"]]
+            df_gantt["bar_color"] = df_gantt.apply(row_color, axis=1)
 
-            fig = go.Figure()
+            fig = px.timeline(
+                df_gantt,
+                x_start="Debut",
+                x_end="Fin",
+                y="Projet",
+                color="Type detail",
+                color_discrete_map=COLOR_MAP,
+                hover_name="Tache",
+                hover_data={"Debut": True, "Fin": True, "Type detail": True, "Projet": False}
+            )
 
-            # Tâches normales par type (pour la légende)
-            for task_type in COLOR_ORDER:
-                df_t = df_normal[df_normal["Type"] == task_type]
-                if df_t.empty:
-                    continue
-                fig.add_trace(go.Bar(
-                    name=task_type,
-                    x=[(row["Fin"] - row["Début"]).days for _, row in df_t.iterrows()],
-                    y=df_t["Y"],
-                    base=[row["Début"].strftime("%Y-%m-%d") for _, row in df_t.iterrows()],
-                    orientation="h",
-                    marker_color=COLOR_MAP[task_type],
-                    marker_line_width=0,
-                    width=0.5,
-                    customdata=df_t[["Tâche", "Projet", "deadline"]].values,
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b><br>"
-                        "Projet: %{customdata[1]}<br>"
-                        "Deadline: %{customdata[2]}<br>"
-                        "<extra></extra>"
-                    ),
-                    legendgroup=task_type,
-                    showlegend=True,
-                ))
+            # Appliquer la couleur grise aux barres des taches terminees
+            # px.timeline cree un trace par type, on recolorie barre par barre
+            for trace in fig.data:
+                type_name = trace.name
+                mask = (df_gantt["Type"] == type_name)
+                subset = df_gantt[mask]
+                colors = list(subset["bar_color"])
+                if colors:
+                    trace.marker.color = colors
 
-            # Tâches terminées : hachurées (pattern)
-            for task_type in COLOR_ORDER:
-                df_t = df_done[df_done["Type"] == task_type]
-                if df_t.empty:
-                    continue
-                fig.add_trace(go.Bar(
-                    name=f"{task_type} ✓",
-                    x=[(row["Fin"] - row["Début"]).days for _, row in df_t.iterrows()],
-                    y=df_t["Y"],
-                    base=[row["Début"].strftime("%Y-%m-%d") for _, row in df_t.iterrows()],
-                    orientation="h",
-                    marker=dict(
-                        color=COLOR_MAP[task_type],
-                        opacity=0.4,
-                        pattern=dict(shape="/", fgcolor="white", size=4, solidity=0.5),
-                        line=dict(color="white", width=1),
-                    ),
-                    width=0.5,
-                    customdata=df_t[["Tâche", "Projet", "deadline"]].values,
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b> ✓ Terminée<br>"
-                        "Projet: %{customdata[1]}<br>"
-                        "Deadline: %{customdata[2]}<br>"
-                        "<extra></extra>"
-                    ),
-                    legendgroup=f"{task_type}_done",
-                    showlegend=False,
-                ))
-
-            n_proj = len(y_order)
-            chart_height = max(500, n_proj * 22 + 160)
+            fig.update_yaxes(autorange="reversed")
+            n_proj = len(df_gantt["Projet"].unique())
+            chart_height = max(500, n_proj * 18 + 140)
 
             fig.update_layout(
-                barmode="overlay",
                 dragmode="pan",
                 height=chart_height,
-                bargap=0.25,
-                bargroupgap=0.05,
+                bargap=0.3,
+                bargroupgap=0.1,
                 margin=dict(l=20, r=20, t=40, b=20),
-                yaxis=dict(
-                    categoryorder="array",
-                    categoryarray=y_order_rev,
-                    tickfont=dict(size=11),
-                    showgrid=True,
-                    gridcolor="rgba(180,180,180,0.18)",
-                    gridwidth=1,
-                ),
-                xaxis=dict(
-                    type="date",
-                    range=[start_view.strftime("%Y-%m-%d"), end_view.strftime("%Y-%m-%d")],
-                    showgrid=False,
-                ),
+                yaxis=dict(tickfont=dict(size=12), showgrid=True,
+                           gridcolor="rgba(180,180,180,0.18)", gridwidth=1),
+                xaxis=dict(showgrid=False),
                 plot_bgcolor="rgba(0,0,0,0)",
-                legend=dict(
-                    orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="center", x=0.5, font=dict(size=10)
-                ),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="center", x=0.5, font=dict(size=10))
             )
+            fig.update_xaxes(range=[start_view, end_view])
 
-            # ── Ligne aujourd'hui ──
-            fig.add_vline(x=today.strftime("%Y-%m-%d"), line_width=2,
-                          line_color="white", opacity=0.9)
+            # Ligne aujourd'hui
+            fig.add_vline(x=today, line_width=2, line_color="white", opacity=0.9)
 
-            # ── Séparateurs de mois (tirets) ──
+            # Separateurs de mois
             cur = date(today.year, today.month, 1)
             while True:
                 cur = (date(cur.year + 1, 1, 1) if cur.month == 12
                        else date(cur.year, cur.month + 1, 1))
                 if cur > end_view:
                     break
-                fig.add_vline(x=cur.strftime("%Y-%m-%d"), line_width=1,
-                              line_dash="dot", line_color="rgba(200,200,200,0.35)")
+                fig.add_vline(x=cur, line_width=1, line_dash="dot",
+                              line_color="rgba(200,200,200,0.35)")
 
-            # ── Séparateurs week-end (samedi) — très subtils ──
-            cur_day = today - timedelta(days=today.weekday())  # lundi courant
+            # Separateurs week-end subtils
+            cur_day = today - timedelta(days=today.weekday())
             while cur_day <= end_view:
                 saturday = cur_day + timedelta(days=5)
-                sunday   = cur_day + timedelta(days=6)
-                if today <= saturday <= end_view:
-                    # Zone weekend colorée légèrement
+                monday_next = cur_day + timedelta(days=7)
+                if saturday <= end_view:
                     fig.add_vrect(
-                        x0=saturday.strftime("%Y-%m-%d"),
-                        x1=(sunday + timedelta(days=1)).strftime("%Y-%m-%d"),
+                        x0=saturday, x1=monday_next,
                         fillcolor="rgba(255,255,255,0.04)",
-                        layer="below",
-                        line_width=0,
+                        layer="below", line_width=0,
                     )
-                    # Ligne samedi
                     fig.add_vline(
-                        x=saturday.strftime("%Y-%m-%d"),
-                        line_width=1,
-                        line_dash="dot",
-                        line_color="rgba(150,150,150,0.18)",
+                        x=saturday, line_width=1, line_dash="dot",
+                        line_color="rgba(160,160,160,0.20)",
                     )
                 cur_day += timedelta(days=7)
 
@@ -1110,7 +1075,7 @@ def main():
         projects_ana = load_projects_with_closed(uid, models, filter_mode)
 
         # Exclure comptes analytiques génériques
-        bad_accounts = ["dépannage (liège)", "projets (lig)"]
+        bad_accounts = ["dépannage (liège)", "projets (lig)", 'Vente pure (LIG)']
         projects_ana = [
             p for p in projects_ana
             if not (
