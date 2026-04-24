@@ -1000,7 +1000,7 @@ def main():
             if not (
             p.get("analytic_account_id")
             and p["analytic_account_id"][1] in ["Dépannage (Liège)", "Projets (LIG)"]
-        ):
+            ):
         ]
         with st.spinner("Chargement des données analytiques…"):
             analytics    = load_analytics_for_projects(uid, models, projects_ana)
