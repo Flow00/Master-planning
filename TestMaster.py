@@ -381,17 +381,26 @@ def load_analytics_data(_uid, _models, project_list):
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount"]}
+        {"fields": ["account_id", "amount", "move_type"]}
     )
     depenses_all_map = {}
     facture_all_map  = {}
     for line in all_lines:
         aid = line["account_id"][0]
         amt = line["amount"]
-        if amt < 0:
-            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
-        elif amt > 0:
-            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + amt
+        move_type = line.get("move_type", "")
+
+        if move_type == "in_invoice":              # Facture fournisseur
+            depenses_all_map[aid] += abs(amt)
+        
+        elif move_type == "in_refund":             # Note de crédit fournisseur
+            depenses_all_map[aid] -= abs(amt)
+        
+        elif move_type == "out_invoice":           # Facture client
+            facture_all_map[aid] += abs(amt)
+        
+        elif move_type == "out_refund":            # Note de crédit client
+            facture_all_map[aid] -= abs(amt)
 
     # ── 2. CA via sale.order — TOUTES années ──────────────────────────────────
     code_to_proj = {}
