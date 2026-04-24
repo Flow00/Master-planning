@@ -557,7 +557,7 @@ def load_analytics_data(_uid, _models, project_list):
         if debug:
             st.subheader("🔍 DEBUG ANALYTIQUE")
             st.dataframe(pd.DataFrame(debug_rows))
-    return result,
+    return result, , debug_rows
 
 
 
@@ -1282,7 +1282,7 @@ def main():
     <div class="footer">C Flow - Powered by Olsen-Engineering</div>
     """, unsafe_allow_html=True)
 
-    analytics, debug = load_analytics_data(...)
+    analytics, debug = load_analytics_data(uid, models, projects_ana)
     st.dataframe(debug)
 
 if __name__ == "__main__":
