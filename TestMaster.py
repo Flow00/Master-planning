@@ -966,7 +966,14 @@ def main():
 
         # Projets avec Cloturés inclus, triés par code décroissant
         projects_ana = load_projects_with_closed(uid, models, filter_mode)
-
+        # ❌ Exclure les projets dont le compte analytique est "PROJETS (LIG)"
+        projects_ana = [
+            p for p in projects_ana
+            if not (
+                p.get("analytic_account_id")
+                and "PROJETS (LIG)" in p["analytic_account_id"][1].upper()
+            )
+        ]
         with st.spinner("Chargement des données analytiques…"):
             analytics    = load_analytics_for_projects(uid, models, projects_ana)
             df_monthly   = load_analytics_monthly(uid, models, projects_ana)
@@ -1020,7 +1027,15 @@ def main():
 
                 # ── Tableau : rendu HTML pour coloriser les lignes fermées ──────
                 st.markdown("#### Détail par projet")
+                search = st.text_input("🔎 Recherche", "", placeholder="Code, client ou projet...")
 
+                if search:
+                    s = search.lower()
+                    df_ana = df_ana[
+                        df_ana["Code"].str.lower().str.contains(s)
+                        | df_ana["Client"].str.lower().str.contains(s)
+                        | df_ana["Projet"].str.lower().str.contains(s)
+                    ]
                 # En-tête
                 cols_def = "90px 130px 1fr 100px 110px 100px 110px 100px 80px"
                 header_html = f"""
