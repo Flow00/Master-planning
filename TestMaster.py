@@ -100,7 +100,7 @@ def load_projects(_uid, _models, filter_mode="both"):
             ('tag_ids', 'in', tag_standard),
             ('tag_ids', 'in', tag_prolig),
         ]
-    else:  # "both"
+    else:
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
             '|',
@@ -206,18 +206,6 @@ def load_purchase_data_all_projects():
 
 
 def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
-    """
-    Couleurs des lignes :
-      - orange (#FFA000)  : partiellement reçu                   → rank 0
-      - grey   (#757575)  : en retard, produit physique           → rank 1
-      - white  (#FFFFFF)  : pas encore dû                         → rank 2
-      - blue   (#1565C0)  : en retard, service                    → rank 3 (liste détaillée)
-      - green  (#2E7D32)  : totalement reçu                       → rank 4
-
-    Progress bar order : orange | grey | white | blue | green
-    Rouge vignette : uniquement si grey > 0 (produits physiques en retard).
-    Les lignes service (blue) n'influent PAS sur la couleur rouge.
-    """
     today = date.today()
     orange = grey = white = green = blue_service = 0
     formatted = []
@@ -312,7 +300,6 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         [[('name', 'ilike', 'PRO (LIG)')]]
     )
 
-    # Pas de filtre sur le stage — on prend tout sauf Template/Annulé
     base_domain = [('stage_id.name', 'not in', ['Template', 'Annulé'])]
 
     if filter_mode == "engineering":
@@ -347,20 +334,33 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         stage_name = p["stage_id"][1] if p.get("stage_id") else ""
         p["is_closed"] = (stage_name == "Cloturé")
 
-    # Tri par code décroissant
-    projects.sort(key=lambda p: extract_project_code(p['display_name']), reverse=True)
+    # Tri : actifs d'abord (rank 1), cloturés ensuite (rank 2), puis par code décroissant dans chaque groupe
+    projects.sort(key=lambda p: (
+        1 if p["is_closed"] else 0,
+        # code décroissant → on inverse avec un préfixe négatif simulé via string inversé
+        tuple(-ord(c) for c in extract_project_code(p['display_name']))
+    ))
     return projects
 
 
 @st.cache_data(ttl=300)
-def load_analytics_for_projects(_uid, _models, project_list):
+def load_analytics_data(_uid, _models, project_list):
     """
-    Bilan analytique année en cours uniquement.
-      - Dépenses   : montants négatifs sur account.analytic.line (année courante)
-      - Facturé    : montants positifs sur account.analytic.line (année courante)
-      - CA total   : montant total des SO confirmés liés au projet (tous les temps)
-      - À facturer : CA total - Facturé (cumulé toutes années)
-      - Marge C    : CA total - Dépenses (année courante)
+    Charge TOUT ce qu'il faut pour l'onglet analytique en un seul appel :
+
+    MÉTRIQUES RÉSUMÉ (année en cours, projets confirmés cette année) :
+      - ca_annee     : montant total des SO confirmés CETTE ANNÉE
+      - depenses_all : toutes les dépenses analytiques (toutes années)
+      - marge_attendue : ca_annee - depenses_all
+      - a_facturer   : ca_annee - facture_all
+
+    TABLEAU (toutes années, tous projets) :
+      - ca_total     : montant total SO confirmés (toutes années)
+      - depenses_all : toutes les dépenses analytiques
+      - facture_all  : tous les revenus analytiques (montants positifs)
+      - a_facturer   : ca_total - facture_all
+      - marge_c      : ca_total - depenses_all
+      - marge_pct    : marge_c / ca_total * 100
     """
     uid, models = _uid, _models
 
@@ -370,81 +370,45 @@ def load_analytics_for_projects(_uid, _models, project_list):
         if p.get("analytic_account_id")
     ]
     if not analytic_ids:
-        return {}
+        return {}, {}
 
-    year_start = f"{date.today().year}-01-01"
-    year_end   = f"{date.today().year}-12-31"
+    year_now = date.today().year
+    year_start = f"{year_now}-01-01"
+    year_end   = f"{year_now}-12-31"
 
-    # ── 1. Lignes analytiques — année en cours ────────────────────────────────
-    analytic_lines = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.analytic.line", "search_read",
-        [[
-            ("account_id", "in", analytic_ids),
-            ("date", ">=", year_start),
-            ("date", "<=", year_end),
-        ]],
-        {"fields": ["account_id", "amount"]}
-    )
-
-    depenses_map = {}
-    facture_map  = {}
-    for line in analytic_lines:
-        aid = line["account_id"][0]
-        amt = line["amount"]
-        if amt < 0:
-            depenses_map[aid] = depenses_map.get(aid, 0.0) + abs(amt)
-        elif amt > 0:
-            facture_map[aid]  = facture_map.get(aid, 0.0) + amt
-
-        # ── NOUVEAU : Dépenses + Facturé toutes années ───────────────────────────────
+    # ── 1. TOUTES les lignes analytiques (dépenses + facturé, toutes années) ──
     all_lines = models.execute_kw(
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
         {"fields": ["account_id", "amount"]}
     )
-    
-    depenses_all = {}
-    facture_all  = {}
-    
+    depenses_all_map = {}
+    facture_all_map  = {}
     for line in all_lines:
         aid = line["account_id"][0]
         amt = line["amount"]
         if amt < 0:
-            depenses_all[aid] = depenses_all.get(aid, 0.0) + abs(amt)
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
         elif amt > 0:
-            facture_all[aid]  = facture_all.get(aid, 0.0) + amt
+            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + amt
 
-    
-    # ── 2. Facturé cumulé toutes années (pour calculer reste à facturer) ──────
-    all_analytic_lines = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.analytic.line", "search_read",
-        [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount"]}
-    )
-    facture_total_map = {}
-    for line in all_analytic_lines:
-        aid = line["account_id"][0]
-        amt = line["amount"]
-        if amt > 0:
-            facture_total_map[aid] = facture_total_map.get(aid, 0.0) + amt
-
-    # ── 3. CA total via sale.order (matching code projet) ─────────────────────
+    # ── 2. CA via sale.order — TOUTES années ──────────────────────────────────
     code_to_proj = {}
     for p in project_list:
         code = extract_project_code(p.get("display_name", ""))
         if code:
             code_to_proj[code] = p
 
-    ca_map = {}
+    ca_all_map   = {}   # analytic_id → CA toutes années
+    ca_annee_map = {}   # analytic_id → CA année en cours uniquement
+
     if code_to_proj:
         all_so = models.execute_kw(
             DB, uid, PASSWORD,
             "sale.order", "search_read",
             [[("state", "in", ["sale", "done"])]],
-            {"fields": ["id", "name", "amount_untaxed"]}
+            {"fields": ["id", "name", "amount_untaxed", "date_order"]}
         )
         for so in all_so:
             so_code = extract_project_code(so["name"])
@@ -454,9 +418,17 @@ def load_analytics_for_projects(_uid, _models, project_list):
             if not proj or not proj.get("analytic_account_id"):
                 continue
             aid = proj["analytic_account_id"][0]
-            ca_map[aid] = ca_map.get(aid, 0.0) + so["amount_untaxed"]
+            amt = so["amount_untaxed"]
 
-    # ── 4. Résultat par projet ────────────────────────────────────────────────
+            # CA toutes années
+            ca_all_map[aid] = ca_all_map.get(aid, 0.0) + amt
+
+            # CA année en cours : filtre sur date_order
+            do = so.get("date_order", "") or ""
+            if do[:10] >= year_start and do[:10] <= year_end:
+                ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
+
+    # ── 3. Résultat par projet ────────────────────────────────────────────────
     result = {}
     for p in project_list:
         if not p.get("analytic_account_id"):
@@ -464,30 +436,35 @@ def load_analytics_for_projects(_uid, _models, project_list):
             continue
         aid = p["analytic_account_id"][0]
 
-        ca_total       = ca_map.get(aid, 0.0)
-        depenses       = depenses_map.get(aid, 0.0)        # année en cours
-        facture_annee  = facture_map.get(aid, 0.0)         # année en cours
-        facture_cumul  = facture_total_map.get(aid, 0.0)   # tout temps
-        a_facturer     = max(ca_total - facture_cumul, 0.0)
-        marge_c        = ca_total - depenses                # CA total - dépenses année
-        marge_pct      = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
+        ca_total      = ca_all_map.get(aid, 0.0)
+        ca_annee      = ca_annee_map.get(aid, 0.0)
+        depenses_all  = depenses_all_map.get(aid, 0.0)
+        facture_all   = facture_all_map.get(aid, 0.0)
+        a_facturer    = max(ca_total - facture_all, 0.0)
+        marge_c       = ca_total - depenses_all
+        marge_pct     = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
+
+        # Marge attendue résumé : CA cette année - toutes dépenses
+        marge_attendue     = ca_annee - depenses_all
+        marge_attendue_pct = (marge_attendue / ca_annee * 100) if ca_annee > 0 else 0.0
+        a_facturer_annee   = max(ca_annee - facture_all, 0.0)
 
         result[p["id"]] = {
-            # Résumé (année en cours)
-            "depenses_annee": depenses,
-            "facture_annee":  facture_annee,
-        
-            # Tableau (toutes années)
-            "depenses_all":   depenses_all.get(aid, 0.0),
-            "facture_all":    facture_all.get(aid, 0.0),
-        
-            # Données globales
-            "ca_total":       ca_total,
-            "a_facturer":     max(ca_total - facture_all.get(aid, 0.0), 0.0),
-            "marge_c":        ca_total - depenses_all.get(aid, 0.0),
-            "marge_pct":      ((ca_total - depenses_all.get(aid, 0.0)) / ca_total * 100) if ca_total > 0 else 0.0,
-        
-            "is_closed":      p.get("is_closed", False),
+            # Pour les métriques résumé (année en cours)
+            "ca_annee":            ca_annee,
+            "depenses_all":        depenses_all,
+            "marge_attendue":      marge_attendue,
+            "marge_attendue_pct":  marge_attendue_pct,
+            "a_facturer_annee":    a_facturer_annee,
+
+            # Pour le tableau (toutes années)
+            "ca_total":    ca_total,
+            "facture_all": facture_all,
+            "a_facturer":  a_facturer,
+            "marge_c":     marge_c,
+            "marge_pct":   marge_pct,
+
+            "is_closed":   p.get("is_closed", False),
         }
 
     return result
@@ -496,9 +473,8 @@ def load_analytics_for_projects(_uid, _models, project_list):
 @st.cache_data(ttl=300)
 def load_analytics_monthly(_uid, _models, project_list):
     """
-    Charge les lignes analytiques des 12 derniers mois pour tous les projets
-    de la liste, agrégées par mois.
-    Retourne un DataFrame avec colonnes : Mois (date), CA, Dépenses
+    Lignes analytiques des 12 derniers mois, agrégées par mois.
+    Retourne un DataFrame : Mois (date), CA, Dépenses
     """
     uid, models = _uid, _models
 
@@ -528,10 +504,10 @@ def load_analytics_monthly(_uid, _models, project_list):
     records = []
     for l in lines:
         d = datetime.strptime(l["date"], "%Y-%m-%d").date()
-        mois = d.replace(day=1)  # 1er du mois
+        mois = d.replace(day=1)
         amt = l["amount"]
         records.append({
-            "Mois": mois,
+            "Mois":     mois,
             "CA":       amt if amt > 0 else 0.0,
             "Dépenses": abs(amt) if amt < 0 else 0.0,
         })
@@ -540,7 +516,6 @@ def load_analytics_monthly(_uid, _models, project_list):
     df_agg = df.groupby("Mois")[["CA", "Dépenses"]].sum().reset_index()
     df_agg = df_agg.sort_values("Mois")
 
-    # Remplir les mois manquants avec 0
     all_months = pd.date_range(
         start=date_start, end=date.today().strftime("%Y-%m-%d"), freq="MS"
     ).date
@@ -572,17 +547,17 @@ COLOR_ORDER = [
 ]
 
 COLOR_MAP = {
-    "Soudure":        "#1E88E5",
-    "Peinture":       "#FDD835",
-    "Assemblage":     "#43A047",
-    "Câblage":        "#8E24AA",
-    "Test":           "#FB8C00",
-    "Montage":        "#E53935",
-    "Mise en service":"#EC407A",
-    "Réception":      "#6D4C41",
-    "Transport":      "#00ACC1",
-    "Etude":          "#34ebc6",
-    "Autres":         "#9E9E9E"
+    "Soudure":         "#1E88E5",
+    "Peinture":        "#FDD835",
+    "Assemblage":      "#43A047",
+    "Câblage":         "#8E24AA",
+    "Test":            "#FB8C00",
+    "Montage":         "#E53935",
+    "Mise en service": "#EC407A",
+    "Réception":       "#6D4C41",
+    "Transport":       "#00ACC1",
+    "Etude":           "#34ebc6",
+    "Autres":          "#9E9E9E"
 }
 
 
@@ -792,7 +767,6 @@ def main():
             )
 
             fig.update_yaxes(autorange="reversed")
-
             n_proj = len(df_gantt["Projet"].unique())
             chart_height = max(500, n_proj * 18 + 140)
 
@@ -825,7 +799,6 @@ def main():
                               line_color="rgba(200,200,200,0.35)")
 
             fig.update_xaxes(range=[start_view, end_view])
-
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
@@ -844,15 +817,15 @@ def main():
             st.rerun()
 
         st.subheader("🔍 Tâches du projet")
-        project_labels = {project_label(p): p["id"] for p in projects}
+        project_labels_map = {project_label(p): p["id"] for p in projects}
         selected_label = st.selectbox(
             "Sélectionne un projet pour afficher ses tâches",
-            ["— Aucun —"] + list(project_labels.keys()),
+            ["— Aucun —"] + list(project_labels_map.keys()),
             index=0
         )
 
         if selected_label != "— Aucun —":
-            proj_id = project_labels[selected_label]
+            proj_id = project_labels_map[selected_label]
             tasks_for_project = sorted(
                 [t for t in tasks if t["project_id"][0] == proj_id],
                 key=lambda x: x["date_deadline"]
@@ -895,15 +868,12 @@ def main():
                     total = summary["total"]
                     total_safe = max(total, 1)
 
-                    # Progress bar : orange | grey | white | blue | green
                     pct_orange = 100 * summary["orange"] / total_safe
                     pct_grey   = 100 * summary["grey"]   / total_safe
                     pct_white  = 100 * summary["white"]  / total_safe
                     pct_blue   = 100 * summary["blue"]   / total_safe
                     pct_green  = 100 * summary["green"]  / total_safe
 
-                    # Couleur du compteur : rouge si produit physique en retard (grey > 0)
-                    # Les services bleus n'influent PAS sur le rouge
                     if summary["grey"] > 0:
                         text_color = "red"
                     elif summary["orange"] > 0:
@@ -986,17 +956,17 @@ def main():
     # 🟨 ONGLET 3 — ANALYTIQUE
     # ============================================================
     with tab3:
+        year_now = date.today().year
         st.markdown(
-            f"### 📊 Bilan analytique par projet "
-            f"<span style='font-size:14px;color:#aaa;'>— Dépenses & Facturé : année {date.today().year}</span>",
+            f"### 📊 Bilan analytique",
             unsafe_allow_html=True
         )
 
-        # Projets avec Cloturés inclus, triés par code décroissant
+        # Projets avec Cloturés inclus, filtrés selon toggle
         projects_ana = load_projects_with_closed(uid, models, filter_mode)
-        # ❌ Exclure les projets dont le compte analytique est "PROJETS (LIG)"
-        bad_accounts = ["dépannage (liège)", "projets (lig)"]
 
+        # Exclure comptes analytiques génériques
+        bad_accounts = ["dépannage (liège)", "projets (lig)"]
         projects_ana = [
             p for p in projects_ana
             if not (
@@ -1004,24 +974,57 @@ def main():
                 and p["analytic_account_id"][1].lower() in bad_accounts
             )
         ]
+
         with st.spinner("Chargement des données analytiques…"):
-            analytics    = load_analytics_for_projects(uid, models, projects_ana)
-            df_monthly   = load_analytics_monthly(uid, models, projects_ana)
+            analytics  = load_analytics_data(uid, models, projects_ana)
+            df_monthly = load_analytics_monthly(uid, models, projects_ana)
 
         if not analytics:
             st.info("Aucune donnée analytique disponible.")
         else:
+            # ── MÉTRIQUES RÉSUMÉ — projets actifs avec SO confirmés en {year_now} ──
+            actifs_avec_ca = [
+                p for p in projects_ana
+                if not p.get("is_closed")
+                and analytics.get(p["id"])
+                and analytics[p["id"]]["ca_annee"] > 0
+            ]
+
+            sum_ca_annee       = sum(analytics[p["id"]]["ca_annee"]       for p in actifs_avec_ca)
+            sum_depenses_annee = sum(analytics[p["id"]]["depenses_all"]    for p in actifs_avec_ca)
+            sum_marge_att      = sum(analytics[p["id"]]["marge_attendue"]  for p in actifs_avec_ca)
+            sum_a_fac_annee    = sum(analytics[p["id"]]["a_facturer_annee"] for p in actifs_avec_ca)
+            marge_att_pct      = (sum_marge_att / sum_ca_annee * 100) if sum_ca_annee > 0 else 0.0
+
+            st.markdown(
+                f"<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
+                f"Projets confirmés en {year_now} (actifs, selon filtre)</div>",
+                unsafe_allow_html=True
+            )
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"CA {year_now}",         fmt_eur(sum_ca_annee))
+            m2.metric("Dépenses associées",      fmt_eur(sum_depenses_annee))
+            m3.metric("Marge attendue",          fmt_eur(sum_marge_att),
+                      delta=f"{marge_att_pct:.1f} %")
+            m4.metric("Reste à facturer",        fmt_eur(sum_a_fac_annee))
+
+            st.markdown("---")
+
+            # ── TABLEAU — tous projets, toutes années ─────────────────────────
+            st.markdown("#### Détail par projet — toutes années")
+
             rows = []
             for p in projects_ana:
                 ana = analytics.get(p["id"])
                 if ana is None:
                     continue
                 code = extract_project_code(p["display_name"])
+                proj_name = short_desc(clean_description_from_display_name(p["display_name"]), 45)
                 rows.append({
                     "_closed":        p.get("is_closed", False),
-                    "Code":           code or p.get("name", "—"),
+                    "_sort":          (1 if p["is_closed"] else 0, code),
+                    "Projet":         proj_name,
                     "Client":         p["company"],
-                    "Projet":         short_desc(clean_description_from_display_name(p["display_name"]), 40),
                     "CA total (€)":   ana["ca_total"],
                     "Dépenses (€)":   ana["depenses_all"],
                     "Facturé (€)":    ana["facture_all"],
@@ -1031,49 +1034,30 @@ def main():
                 })
 
             if not rows:
-                st.info("Aucune ligne analytique trouvée pour ces projets.")
+                st.info("Aucune donnée trouvée.")
             else:
                 df_ana = pd.DataFrame(rows)
 
-                # ── Métriques résumé (projets actifs uniquement pour le bilan) ──
-                df_actifs = df_ana[~df_ana["_closed"]]
-                total_ca      = df_actifs["CA total (€)"].sum()
-                total_dep     = df_actifs["Dépenses (€)"].sum()
-                total_afac    = df_actifs["À facturer (€)"].sum()
-                total_marge   = df_actifs["Marge C (€)"].sum()
-                total_marge_p = (total_marge / total_ca * 100) if total_ca > 0 else 0.0
-
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("CA Total (actifs)",    fmt_eur(total_ca))
-                m2.metric(f"Dépenses {date.today().year}", fmt_eur(total_dep))
-                m3.metric("À facturer",           fmt_eur(total_afac))
-                m4.metric(
-                    "Marge C globale",
-                    fmt_eur(total_marge),
-                    delta=f"{total_marge_p:.1f} %"
-                )
-
-                st.markdown("---")
-
-                # ── Tableau : rendu HTML pour coloriser les lignes fermées ──────
-                st.markdown("#### Détail par projet")
-                search = st.text_input("🔎 Recherche", "", placeholder="Code, client ou projet...")
-
+                # Recherche
+                search = st.text_input("🔎 Recherche", "", placeholder="Projet ou client…", key="ana_search")
                 if search:
                     s = search.lower()
                     df_ana = df_ana[
-                        df_ana["Code"].str.lower().str.contains(s)
+                        df_ana["Projet"].str.lower().str.contains(s)
                         | df_ana["Client"].str.lower().str.contains(s)
-                        | df_ana["Projet"].str.lower().str.contains(s)
                     ]
-                # En-tête
-                cols_def = "90px 130px 1fr 100px 110px 100px 110px 100px 80px"
+
+                # CSS colonnes
+                cols_def = "2fr 1.5fr 100px 110px 100px 110px 100px 80px"
+
+                # En-tête fixe
                 header_html = f"""
                 <div style="display:grid;grid-template-columns:{cols_def};
-                    column-gap:10px;padding:6px 10px;font-weight:bold;
-                    font-size:12px;color:#aaa;border-bottom:1px solid #444;
-                    margin-bottom:4px;">
-                    <div>Code</div><div>Client</div><div>Projet</div>
+                    column-gap:10px;padding:6px 12px;font-weight:bold;
+                    font-size:12px;color:#aaa;border-bottom:2px solid #555;
+                    margin-bottom:2px;position:sticky;top:0;background:#0e1117;z-index:10;">
+                    <div>Projet</div>
+                    <div>Client</div>
                     <div style="text-align:right;">CA Total</div>
                     <div style="text-align:right;">Dépenses</div>
                     <div style="text-align:right;">Facturé</div>
@@ -1081,36 +1065,69 @@ def main():
                     <div style="text-align:right;">Marge C (€)</div>
                     <div style="text-align:right;">Marge C (%)</div>
                 </div>"""
-                st.markdown(header_html, unsafe_allow_html=True)
 
+                # Lignes
+                rows_html = ""
                 for _, row in df_ana.iterrows():
                     is_closed = row["_closed"]
-                    bg    = "#0d2a4a" if is_closed else "rgba(255,255,255,0.03)"
-                    border = "1px solid #1565C0" if is_closed else "1px solid #333"
-                    marge_color = "#e53935" if row["Marge C (€)"] < 0 else (
-                        "#43a047" if row["Marge C (%)"] >= 20 else "#FB8C00"
+                    bg     = "#0d2a4a" if is_closed else "rgba(255,255,255,0.03)"
+                    border = "1px solid #1a4a7a" if is_closed else "1px solid #2a2a2a"
+                    marge_color = (
+                        "#e53935" if row["Marge C (€)"] < 0
+                        else "#43a047" if row["Marge C (%)"] >= 20
+                        else "#FB8C00"
                     )
-                    closed_badge = " <span style='font-size:10px;background:#1565C0;color:white;padding:1px 5px;border-radius:3px;'>Cloturé</span>" if is_closed else ""
+                    closed_badge = (
+                        " <span style='font-size:9px;background:#1565C0;color:white;"
+                        "padding:1px 4px;border-radius:3px;vertical-align:middle;'>✓ Cloturé</span>"
+                        if is_closed else ""
+                    )
 
                     def fe(v): return f"{v:,.0f} €".replace(",", " ")
                     def fp(v): return f"{v:.1f} %"
 
-                    row_html = f"""
+                    rows_html += f"""
                     <div style="display:grid;grid-template-columns:{cols_def};
-                        column-gap:10px;padding:7px 10px;font-size:13px;
-                        background:{bg};border:{border};border-radius:4px;margin-bottom:3px;
-                        align-items:center;">
-                        <div style="white-space:nowrap;font-weight:600;">{row['Code']}</div>
-                        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{row['Client']}</div>
-                        <div style="overflow:hidden;text-overflow:ellipsis;">{row['Projet']}{closed_badge}</div>
+                        column-gap:10px;padding:6px 12px;font-size:13px;
+                        background:{bg};border-bottom:{border};
+                        align-items:center;min-height:32px;">
+                        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                            {row['Projet']}{closed_badge}
+                        </div>
+                        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;">
+                            {row['Client']}
+                        </div>
                         <div style="text-align:right;">{fe(row['CA total (€)'])}</div>
                         <div style="text-align:right;">{fe(row['Dépenses (€)'])}</div>
                         <div style="text-align:right;">{fe(row['Facturé (€)'])}</div>
-                        <div style="text-align:right;color:#00ACC1;font-weight:600;">{fe(row['À facturer (€)'])}</div>
-                        <div style="text-align:right;color:{marge_color};font-weight:600;">{fe(row['Marge C (€)'])}</div>
-                        <div style="text-align:right;color:{marge_color};">{fp(row['Marge C (%)'])}</div>
+                        <div style="text-align:right;color:#00ACC1;font-weight:600;">
+                            {fe(row['À facturer (€)'])}
+                        </div>
+                        <div style="text-align:right;color:{marge_color};font-weight:600;">
+                            {fe(row['Marge C (€)'])}
+                        </div>
+                        <div style="text-align:right;color:{marge_color};">
+                            {fp(row['Marge C (%)'])}
+                        </div>
                     </div>"""
-                    st.markdown(row_html, unsafe_allow_html=True)
+
+                # Wrapper scrollable avec en-tête collant
+                st.markdown(
+                    f"""
+                    <div style="
+                        border:1px solid #333;
+                        border-radius:6px;
+                        overflow:hidden;
+                        max-height:420px;
+                        overflow-y:auto;
+                        background:#0e1117;
+                    ">
+                        {header_html}
+                        <div>{rows_html}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
                 st.markdown("---")
 
@@ -1123,7 +1140,6 @@ def main():
                     df_m = df_monthly.copy()
                     df_m["Mois_label"] = pd.to_datetime(df_m["Mois"]).dt.strftime("%b %Y")
 
-                    # Deux séries : CA et Dépenses
                     df_ca  = df_m[["Mois", "Mois_label", "CA"]].rename(columns={"CA": "Montant"})
                     df_ca["Série"] = "CA facturé"
                     df_dep = df_m[["Mois", "Mois_label", "Dépenses"]].rename(columns={"Dépenses": "Montant"})
