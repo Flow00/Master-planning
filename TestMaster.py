@@ -555,9 +555,9 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
         if debug:
-        st.subheader("🔍 DEBUG ANALYTIQUE")
-        st.dataframe(pd.DataFrame(debug_rows))
-    return result
+            st.subheader("🔍 DEBUG ANALYTIQUE")
+            st.dataframe(pd.DataFrame(debug_rows))
+    return result,
 
 
 
