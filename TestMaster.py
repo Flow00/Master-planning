@@ -346,84 +346,139 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_analytics_data(_uid, _models, project_list):
     """
-    Charge TOUT ce qu'il faut pour l'onglet analytique en un seul appel :
+    Charge tout ce qu’il faut pour l’onglet analytique, en mode robuste + optimisé.
 
-    MÉTRIQUES RÉSUMÉ (année en cours, projets confirmés cette année) :
-      - ca_annee     : montant total des SO confirmés CETTE ANNÉE
-      - depenses_all : toutes les dépenses analytiques (toutes années)
-      - marge_attendue : ca_annee - depenses_all
-      - a_facturer   : ca_annee - facture_all
-
-    TABLEAU (toutes années, tous projets) :
-      - ca_total     : montant total SO confirmés (toutes années)
-      - depenses_all : toutes les dépenses analytiques
-      - facture_all  : tous les revenus analytiques (montants positifs)
-      - a_facturer   : ca_total - facture_all
-      - marge_c      : ca_total - depenses_all
-      - marge_pct    : marge_c / ca_total * 100
+    - Gère correctement les notes de crédit (out_refund / in_refund)
+    - Limite la taille des requêtes Odoo (batch sur les comptes analytiques)
+    - Évite de recalculer 15 fois les mêmes choses
     """
     uid, models = _uid, _models
 
+    # --- 0. Récup des comptes analytiques liés aux projets ---
     analytic_ids = [
         p["analytic_account_id"][0]
         for p in project_list
         if p.get("analytic_account_id")
     ]
     if not analytic_ids:
-        return {}, {}
+        return {}
 
     year_now = date.today().year
     year_start = f"{year_now}-01-01"
     year_end   = f"{year_now}-12-31"
 
-    # ── 1. TOUTES les lignes analytiques (dépenses + facturé, toutes années) ──
-    all_lines = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.analytic.line", "search_read",
-        [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount", "move_id"]}
-    )
-   
-    move_ids = list({l["move_id"][0] for l in all_lines if l.get("move_id")})
-    moves = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.move", "read",
-        [move_ids],
-        {"fields": ["id", "move_type"]}
-    )
-    move_type_map = {m["id"]: m["move_type"] for m in moves}
+    # =========================================================
+    # 1) LIGNES ANALYTIQUES (toutes années) EN BATCH
+    #    + récupération move_id pour aller chercher move_type
+    # =========================================================
+    def fetch_analytic_lines_batch(models, uid, analytic_ids, batch_size=80):
+        all_lines = []
+        for i in range(0, len(analytic_ids), batch_size):
+            sub_ids = analytic_ids[i:i+batch_size]
+            try:
+                lines = models.execute_kw(
+                    DB, uid, PASSWORD,
+                    "account.analytic.line", "search_read",
+                    [[("account_id", "in", sub_ids)]],
+                    {"fields": ["account_id", "amount", "date", "move_id"]}
+                )
+                all_lines.extend(lines)
+            except Exception as e:
+                # En cas de problème sur un batch, on log et on continue
+                print(f"[WARN] Erreur sur batch analytic_ids {sub_ids[:5]}... : {e}")
+        return all_lines
+
+    all_lines = fetch_analytic_lines_batch(models, uid, analytic_ids)
 
     depenses_all_map = {}
     facture_all_map  = {}
+
+    # =========================================================
+    # 2) RÉCUPÉRATION DES move_type VIA move_id
+    #    analytic.line -> account.move.line -> account.move
+    # =========================================================
+    move_line_ids = {
+        l["move_id"][0]
+        for l in all_lines
+        if l.get("move_id")
+    }
+    move_line_map = {}
+    move_type_map = {}
+
+    if move_line_ids:
+        # a) account.move.line : pour récupérer move_id (account.move)
+        move_lines = models.execute_kw(
+            DB, uid, PASSWORD,
+            "account.move.line", "read",
+            [list(move_line_ids)],
+            {"fields": ["id", "move_id"]}
+        )
+        move_ids = set()
+        for ml in move_lines:
+            ml_id = ml["id"]
+            mv = ml.get("move_id")
+            if mv:
+                move_id = mv[0]
+                move_line_map[ml_id] = move_id
+                move_ids.add(move_id)
+
+        # b) account.move : pour récupérer move_type
+        if move_ids:
+            moves = models.execute_kw(
+                DB, uid, PASSWORD,
+                "account.move", "read",
+                [list(move_ids)],
+                {"fields": ["id", "move_type"]}
+            )
+            move_type_map = {m["id"]: m.get("move_type", "") for m in moves}
+
+    # =========================================================
+    # 3) AGRÉGATION DÉPENSES / FACTURÉ AVEC GESTION DES NOTES DE CRÉDIT
+    # =========================================================
     for line in all_lines:
+        if not line.get("account_id"):
+            continue
         aid = line["account_id"][0]
         amt = line["amount"]
-        move_id = line["move_id"][0] if line.get("move_id") else None
+
+        move_line_id = line["move_id"][0] if line.get("move_id") else None
+        move_id = move_line_map.get(move_line_id)
         move_type = move_type_map.get(move_id, "")
 
-        if move_type == "in_invoice":              # Facture fournisseur
-            depenses_all_map[aid] += abs(amt)
-        
-        elif move_type == "in_refund":             # Note de crédit fournisseur
-            depenses_all_map[aid] -= abs(amt)
-        
-        elif move_type == "out_invoice":           # Facture client
-            facture_all_map[aid] += abs(amt)
-        
-        elif move_type == "out_refund":            # Note de crédit client
-            facture_all_map[aid] -= abs(amt)
+        # Si on n’a pas de move_type (cas rare), on retombe sur l’ancienne logique
+        if not move_type:
+            if amt < 0:
+                depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
+            elif amt > 0:
+                facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + amt
+            continue
 
-    # ── 2. CA via sale.order — TOUTES années ──────────────────────────────────
+        # --- Vendor bills / notes de crédit fournisseur ---
+        if move_type == "in_invoice":          # facture fournisseur
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
+        elif move_type == "in_refund":         # note de crédit fournisseur
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) - abs(amt)
+
+        # --- Customer invoices / notes de crédit client ---
+        elif move_type == "out_invoice":       # facture client
+            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + abs(amt)
+        elif move_type == "out_refund":        # note de crédit client
+            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) - abs(amt)
+
+    # =========================================================
+    # 4) CA via sale.order (toutes années + année en cours)
+    # =========================================================
     code_to_proj = {}
     for p in project_list:
         code = extract_project_code(p.get("display_name", ""))
         if code:
             code_to_proj[code] = p
 
-    ca_all_map   = {}   # analytic_id → CA toutes années
-    ca_annee_map = {}   # analytic_id → CA année en cours uniquement
+    ca_all_map   = {}
+    ca_annee_map = {}
 
     if code_to_proj:
+        # On limite aux SO confirmées
         all_so = models.execute_kw(
             DB, uid, PASSWORD,
             "sale.order", "search_read",
@@ -440,15 +495,15 @@ def load_analytics_data(_uid, _models, project_list):
             aid = proj["analytic_account_id"][0]
             amt = so["amount_untaxed"]
 
-            # CA toutes années
             ca_all_map[aid] = ca_all_map.get(aid, 0.0) + amt
 
-            # CA année en cours : filtre sur date_order
-            do = so.get("date_order", "") or ""
-            if do[:10] >= year_start and do[:10] <= year_end:
+            do = (so.get("date_order") or "")[:10]
+            if year_start <= do <= year_end:
                 ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
 
-    # ── 3. Résultat par projet ────────────────────────────────────────────────
+    # =========================================================
+    # 5) SYNTHÈSE PAR PROJET (même structure que ta version)
+    # =========================================================
     result = {}
     for p in project_list:
         if not p.get("analytic_account_id"):
@@ -456,30 +511,27 @@ def load_analytics_data(_uid, _models, project_list):
             continue
         aid = p["analytic_account_id"][0]
 
-        ca_total      = ca_all_map.get(aid, 0.0)
-        ca_annee      = ca_annee_map.get(aid, 0.0)
-        depenses_all  = depenses_all_map.get(aid, 0.0)
-        facture_all   = facture_all_map.get(aid, 0.0)
-        a_facturer    = max(ca_total - facture_all, 0.0)
-        marge_c       = ca_total - depenses_all
-        marge_pct     = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
+        ca_total     = ca_all_map.get(aid, 0.0)
+        ca_annee     = ca_annee_map.get(aid, 0.0)
+        dep_all      = depenses_all_map.get(aid, 0.0)
+        fact_all     = facture_all_map.get(aid, 0.0)
+        a_facturer   = max(ca_total - fact_all, 0.0)
+        marge_c      = ca_total - dep_all
+        marge_pct    = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
 
-        # Marge attendue résumé : CA cette année - toutes dépenses
-        marge_attendue     = ca_annee - depenses_all
+        marge_attendue     = ca_annee - dep_all
         marge_attendue_pct = (marge_attendue / ca_annee * 100) if ca_annee > 0 else 0.0
-        a_facturer_annee   = max(ca_annee - facture_all, 0.0)
+        a_facturer_annee   = max(ca_annee - fact_all, 0.0)
 
         result[p["id"]] = {
-            # Pour les métriques résumé (année en cours)
-            "ca_annee":            ca_annee,
-            "depenses_all":        depenses_all,
-            "marge_attendue":      marge_attendue,
-            "marge_attendue_pct":  marge_attendue_pct,
-            "a_facturer_annee":    a_facturer_annee,
+            "ca_annee":           ca_annee,
+            "depenses_all":       dep_all,
+            "marge_attendue":     marge_attendue,
+            "marge_attendue_pct": marge_attendue_pct,
+            "a_facturer_annee":   a_facturer_annee,
 
-            # Pour le tableau (toutes années)
             "ca_total":    ca_total,
-            "facture_all": facture_all,
+            "facture_all": fact_all,
             "a_facturer":  a_facturer,
             "marge_c":     marge_c,
             "marge_pct":   marge_pct,
@@ -488,6 +540,7 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
     return result
+
 
 
 @st.cache_data(ttl=300)
