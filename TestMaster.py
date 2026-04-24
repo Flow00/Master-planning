@@ -1282,6 +1282,8 @@ def main():
     <div class="footer">C Flow - Powered by Olsen-Engineering</div>
     """, unsafe_allow_html=True)
 
+    analytics, debug = load_analytics_data(...)
+    st.dataframe(debug)
 
 if __name__ == "__main__":
     main()
