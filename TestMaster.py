@@ -346,9 +346,13 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_analytics_data(_uid, _models, project_list):
     """
-    Version SANS move_id.
-    Classification basée uniquement sur le type de compte financier.
-    Ultra-robuste, ultra-rapide, compatible tous flux Odoo.
+    Version ULTRA-RAPIDE :
+      - 1 seul appel analytique
+      - 1 seul appel sale.order
+      - classification par signe du montant
+      - aucune dépendance comptable
+      - aucune lecture account.account
+      - aucune lecture move_id
     """
     uid, models = _uid, _models
 
@@ -366,43 +370,20 @@ def load_analytics_data(_uid, _models, project_list):
     year_end   = f"{year_now}-12-31"
 
     # =========================================================
-    # 1) LIGNES ANALYTIQUES EN BATCH
+    # 1) LIGNES ANALYTIQUES — 1 SEUL APPEL
     # =========================================================
-    def fetch_analytic_lines_batch(models, uid, analytic_ids, batch_size=80):
-        all_lines = []
-        for i in range(0, len(analytic_ids), batch_size):
-            sub_ids = analytic_ids[i:i+batch_size]
-            try:
-                lines = models.execute_kw(
-                    DB, uid, PASSWORD,
-                    "account.analytic.line", "search_read",
-                    [[("account_id", "in", sub_ids)]],
-                    {"fields": ["account_id", "amount", "date"]}
-                )
-                all_lines.extend(lines)
-            except Exception as e:
-                print(f"[WARN] Erreur batch analytic_ids {sub_ids[:5]} : {e}")
-        return all_lines
-
-    all_lines = fetch_analytic_lines_batch(models, uid, analytic_ids)
+    all_lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.line", "search_read",
+        [[("account_id", "in", analytic_ids)]],
+        {"fields": ["account_id", "amount", "date"], "limit": 1000000}
+    )
 
     depenses_all_map = {}
     facture_all_map  = {}
 
     # =========================================================
-    # 2) CHARGEMENT DES COMPTES FINANCIERS
-    # =========================================================
-    account_ids = {l["account_id"][0] for l in all_lines if l.get("account_id")}
-    accounts = models.execute_kw(
-        DB, uid, PASSWORD,
-        "account.account", "read",
-        [list(account_ids)],
-        {"fields": ["id", "user_type_id"]}
-    )
-    account_type_map = {a["id"]: (a["user_type_id"][1] or "").lower() for a in accounts}
-
-    # =========================================================
-    # 3) CLASSIFICATION DÉPENSES / FACTURÉ
+    # 2) CLASSIFICATION PAR SIGNE DU MONTANT
     # =========================================================
     for line in all_lines:
         if not line.get("account_id"):
@@ -411,22 +392,13 @@ def load_analytics_data(_uid, _models, project_list):
         aid = line["account_id"][0]
         amt = line["amount"]
 
-        acc_type = account_type_map.get(aid, "")
-
-        # --- Comptes de dépense ---
-        if "expense" in acc_type or "dépense" in acc_type:
+        if amt < 0:
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
-
-        # --- Comptes de revenu ---
-        elif "income" in acc_type or "revenu" in acc_type:
-            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + abs(amt)
-
-        # --- Fallback demandé : si inconnu → CHARGE ---
-        else:
-            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
+        elif amt > 0:
+            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
 
     # =========================================================
-    # 4) CA via sale.order
+    # 3) CA via sale.order — 1 SEUL APPEL
     # =========================================================
     code_to_proj = {}
     for p in project_list:
@@ -442,7 +414,7 @@ def load_analytics_data(_uid, _models, project_list):
             DB, uid, PASSWORD,
             "sale.order", "search_read",
             [[("state", "in", ["sale", "done"])]],
-            {"fields": ["id", "name", "amount_untaxed", "date_order"]}
+            {"fields": ["id", "name", "amount_untaxed", "date_order"], "limit": 1000000}
         )
 
         for so in all_so:
@@ -464,7 +436,7 @@ def load_analytics_data(_uid, _models, project_list):
                 ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
 
     # =========================================================
-    # 5) SYNTHÈSE PAR PROJET
+    # 4) SYNTHÈSE PAR PROJET
     # =========================================================
     result = {}
     for p in project_list:
@@ -504,6 +476,7 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
     return result
+
 
 
 
