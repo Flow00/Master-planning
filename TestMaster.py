@@ -381,14 +381,25 @@ def load_analytics_data(_uid, _models, project_list):
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount", "move_type"]}
+        {"fields": ["account_id", "amount", "move_id"]}
     )
+   
+    move_ids = list({l["move_id"][0] for l in all_lines if l.get("move_id")})
+    moves = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.move", "read",
+        [move_ids],
+        {"fields": ["id", "move_type"]}
+    )
+    move_type_map = {m["id"]: m["move_type"] for m in moves}
+
     depenses_all_map = {}
     facture_all_map  = {}
     for line in all_lines:
         aid = line["account_id"][0]
         amt = line["amount"]
-        move_type = line.get("move_type", "")
+        move_id = line["move_id"][0] if line.get("move_id") else None
+        move_type = move_type_map.get(move_id, "")
 
         if move_type == "in_invoice":              # Facture fournisseur
             depenses_all_map[aid] += abs(amt)
