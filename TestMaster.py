@@ -1073,7 +1073,7 @@ def main():
                     margin-bottom:4px;">
                     <div>Code</div><div>Client</div><div>Projet</div>
                     <div style="text-align:right;">CA Total</div>
-                    <div style="text-align:right;">Dépenses {date.today().year}</div>
+                    <div style="text-align:right;">Dépenses</div>
                     <div style="text-align:right;">Facturé</div>
                     <div style="text-align:right;">À facturer</div>
                     <div style="text-align:right;">Marge C (€)</div>
