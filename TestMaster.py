@@ -346,12 +346,9 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_analytics_data(_uid, _models, project_list):
     """
-    Version robuste + compatible toutes versions Odoo.
-    Gère :
-      - in_invoice / in_refund (fournisseurs)
-      - out_invoice / out_refund (clients)
-      - lignes analytiques sans move_id
-      - batching pour éviter les Fault
+    Version SANS move_id.
+    Classification basée uniquement sur le type de compte financier.
+    Ultra-robuste, ultra-rapide, compatible tous flux Odoo.
     """
     uid, models = _uid, _models
 
@@ -380,15 +377,7 @@ def load_analytics_data(_uid, _models, project_list):
                     DB, uid, PASSWORD,
                     "account.analytic.line", "search_read",
                     [[("account_id", "in", sub_ids)]],
-                    {
-                        "fields": [
-                            "account_id",
-                            "amount",
-                            "date",
-                            "move_id",        # v14+
-                            "move_line_id"    # v12/v13
-                        ]
-                    }
+                    {"fields": ["account_id", "amount", "date"]}
                 )
                 all_lines.extend(lines)
             except Exception as e:
@@ -401,46 +390,16 @@ def load_analytics_data(_uid, _models, project_list):
     facture_all_map  = {}
 
     # =========================================================
-    # 2) RÉCUPÉRATION DES move_id (account.move)
+    # 2) CHARGEMENT DES COMPTES FINANCIERS
     # =========================================================
-    # On récupère d'abord les move_line_id (account.move.line)
-    move_line_ids = set()
-    for l in all_lines:
-        if l.get("move_id"):
-            move_line_ids.add(l["move_id"][0])
-        elif l.get("move_line_id"):
-            move_line_ids.add(l["move_line_id"][0])
-
-    move_line_map = {}   # move_line_id → move_id
-    move_type_map = {}   # move_id → move_type
-
-    if move_line_ids:
-        # a) Lire account.move.line → move_id
-        move_lines = models.execute_kw(
-            DB, uid, PASSWORD,
-            "account.move.line", "read",
-            [list(move_line_ids)],
-            {"fields": ["id", "move_id"]}
-        )
-
-        move_ids = set()
-        for ml in move_lines:
-            ml_id = ml["id"]
-            mv = ml.get("move_id")
-            if mv:
-                move_id = mv[0]
-                move_line_map[ml_id] = move_id
-                move_ids.add(move_id)
-
-        # b) Lire account.move → move_type
-        if move_ids:
-            moves = models.execute_kw(
-                DB, uid, PASSWORD,
-                "account.move", "read",
-                [list(move_ids)],
-                {"fields": ["id", "move_type"]}
-            )
-            move_type_map = {m["id"]: m.get("move_type", "") for m in moves}
+    account_ids = {l["account_id"][0] for l in all_lines if l.get("account_id")}
+    accounts = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.account", "read",
+        [list(account_ids)],
+        {"fields": ["id", "user_type_id"]}
+    )
+    account_type_map = {a["id"]: (a["user_type_id"][1] or "").lower() for a in accounts}
 
     # =========================================================
     # 3) CLASSIFICATION DÉPENSES / FACTURÉ
@@ -452,36 +411,19 @@ def load_analytics_data(_uid, _models, project_list):
         aid = line["account_id"][0]
         amt = line["amount"]
 
-        # --- Détection du move_line_id selon version Odoo ---
-        move_line_id = None
-        if line.get("move_id"):
-            move_line_id = line["move_id"][0]
-        elif line.get("move_line_id"):
-            move_line_id = line["move_line_id"][0]
+        acc_type = account_type_map.get(aid, "")
 
-        # --- move_id (account.move) ---
-        move_id = move_line_map.get(move_line_id)
-        move_type = move_type_map.get(move_id, "")
-
-        # --- Classification ---
-        if move_type == "in_invoice":          # facture fournisseur
+        # --- Comptes de dépense ---
+        if "expense" in acc_type or "dépense" in acc_type:
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
 
-        elif move_type == "in_refund":         # note de crédit fournisseur
-            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) - abs(amt)
-
-        elif move_type == "out_invoice":       # facture client
+        # --- Comptes de revenu ---
+        elif "income" in acc_type or "revenu" in acc_type:
             facture_all_map[aid] = facture_all_map.get(aid, 0.0) + abs(amt)
 
-        elif move_type == "out_refund":        # note de crédit client
-            facture_all_map[aid] = facture_all_map.get(aid, 0.0) - abs(amt)
-
+        # --- Fallback demandé : si inconnu → CHARGE ---
         else:
-            # --- Fallback intelligent ---
-            if amt < 0:
-                depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
-            elif amt > 0:
-                facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
+            depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
 
     # =========================================================
     # 4) CA via sale.order
@@ -562,6 +504,7 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
     return result
+
 
 
 
