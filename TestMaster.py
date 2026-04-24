@@ -346,24 +346,24 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_analytics_data(_uid, _models, project_list):
     """
-    Analytique basée sur le partenaire :
-      - Si partner_id de la ligne analytique = client du projet → Facturé (montant tel quel)
-      - Sinon → Dépenses (montant tel quel)
-      - 1 appel account.analytic.line
+    Version ULTRA-RAPIDE et 100% correcte pour la Belgique :
+      - 1 appel analytique
       - 1 appel sale.order
+      - 1 appel account.account (batch)
+      - Classification basée sur le numéro de compte :
+            6xxxxxx = Dépense
+            7xxxxxx = Revenu
+            autres  = ignoré
+      - Notes de crédit gérées automatiquement
     """
     uid, models = _uid, _models
 
     # --- Comptes analytiques des projets ---
-    analytic_ids = []
-    analytic_to_client_partner = {}  # analytic_id -> partner_id client
-
-    for p in project_list:
-        if p.get("analytic_account_id") and p.get("partner_id"):
-            aid = p["analytic_account_id"][0]
-            analytic_ids.append(aid)
-            analytic_to_client_partner[aid] = p["partner_id"][0]
-
+    analytic_ids = [
+        p["analytic_account_id"][0]
+        for p in project_list
+        if p.get("analytic_account_id")
+    ]
     if not analytic_ids:
         return {}
 
@@ -378,14 +378,38 @@ def load_analytics_data(_uid, _models, project_list):
         DB, uid, PASSWORD,
         "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
-        {"fields": ["account_id", "amount", "date", "partner_id"], "limit": 1000000}
+        {"fields": ["account_id", "amount", "general_account_id"], "limit": 1000000}
     )
 
     depenses_all_map = {}
     facture_all_map  = {}
 
     # =========================================================
-    # 2) CLASSIFICATION PAR PARTENAIRE
+    # 2) CHARGEMENT DES COMPTES FINANCIERS (batch)
+    # =========================================================
+    account_ids = {
+        l["general_account_id"][0]
+        for l in all_lines
+        if l.get("general_account_id")
+    }
+
+    account_code_map = {}
+    account_ids_list = list(account_ids)
+    batch_size = 80
+
+    for i in range(0, len(account_ids_list), batch_size):
+        sub_ids = account_ids_list[i:i+batch_size]
+        accounts = models.execute_kw(
+            DB, uid, PASSWORD,
+            "account.account", "read",
+            [sub_ids],
+            {"fields": ["id", "code"]}
+        )
+        for a in accounts:
+            account_code_map[a["id"]] = a["code"]
+
+    # =========================================================
+    # 3) CLASSIFICATION PAR NUMÉRO DE COMPTE
     # =========================================================
     for line in all_lines:
         if not line.get("account_id"):
@@ -394,19 +418,30 @@ def load_analytics_data(_uid, _models, project_list):
         aid = line["account_id"][0]
         amt = line["amount"]
 
-        client_pid = analytic_to_client_partner.get(aid)
-        line_partner = line.get("partner_id")
-        line_pid = line_partner[0] if line_partner else None
+        ga = line.get("general_account_id")
+        if not ga:
+            continue
 
-        if client_pid and line_pid == client_pid:
-            # Ligne liée au client du projet → Facturé
-            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
-        else:
-            # Tout le reste → Dépenses
+        acc_id = ga[0]
+        code = account_code_map.get(acc_id, "")
+
+        if not code:
+            continue
+
+        # --- Comptes de dépense (classe 6) ---
+        if code.startswith("6"):
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
 
+        # --- Comptes de revenu (classe 7) ---
+        elif code.startswith("7"):
+            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
+
+        # --- Comptes 3/4/5 ignorés ---
+        else:
+            continue
+
     # =========================================================
-    # 3) CA via sale.order — 1 SEUL APPEL
+    # 4) CA via sale.order — 1 SEUL APPEL
     # =========================================================
     code_to_proj = {}
     for p in project_list:
@@ -444,7 +479,7 @@ def load_analytics_data(_uid, _models, project_list):
                 ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
 
     # =========================================================
-    # 4) SYNTHÈSE PAR PROJET
+    # 5) SYNTHÈSE PAR PROJET
     # =========================================================
     result = {}
     for p in project_list:
@@ -484,6 +519,7 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
     return result
+
 
 
 
