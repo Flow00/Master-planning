@@ -73,12 +73,6 @@ def extract_project_code(display_name: str) -> str:
 
 @st.cache_data(ttl=300)
 def load_projects(_uid, _models, filter_mode="both"):
-    """
-    Charge les projets selon le mode de filtre :
-      - "engineering" : tag Engineering + PRO (LIG)
-      - "standard"    : tag Engineering uniquement (sans PRO (LIG))
-      - "both"        : les deux combinés
-    """
     uid, models = _uid, _models
 
     tag_engineering = models.execute_kw(
@@ -95,30 +89,23 @@ def load_projects(_uid, _models, filter_mode="both"):
     )
 
     if filter_mode == "engineering":
-        # Engineering ET PRO (LIG)
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
             ('tag_ids', 'in', tag_engineering),
             ('tag_ids', 'in', tag_prolig),
         ]
     elif filter_mode == "standard":
-        # Engineering SANS PRO (LIG)
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
             ('tag_ids', 'in', tag_standard),
             ('tag_ids', 'in', tag_prolig),
         ]
     else:  # "both"
-        # Engineering (avec ou sans PRO (LIG))
         domain = [
             ('stage_id.name', 'not in', ['Cloturé', 'Template', 'Annulé']),
-
-            # (Engineering OU Standard)
             '|',
                 ('tag_ids', 'in', tag_engineering),
                 ('tag_ids', 'in', tag_standard),
-        
-            # ET pro_lig
             ('tag_ids', 'in', tag_prolig),
         ]
 
@@ -172,7 +159,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
 
 # ============================================================
-# 🔥 PURCHASE LOADER — analytic_distribution par ligne
+# 🔥 PURCHASE LOADER
 # ============================================================
 
 @st.cache_data(ttl=300)
@@ -219,13 +206,25 @@ def load_purchase_data_all_projects():
 
 
 def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
+    """
+    Couleurs des lignes :
+      - orange (#FFA000)  : partiellement reçu                   → rank 0
+      - grey   (#757575)  : en retard, produit physique           → rank 1
+      - white  (#FFFFFF)  : pas encore dû                         → rank 2
+      - blue   (#1565C0)  : en retard, service                    → rank 3 (liste détaillée)
+      - green  (#2E7D32)  : totalement reçu                       → rank 4
+
+    Progress bar order : orange | grey | white | blue | green
+    Rouge vignette : uniquement si grey > 0 (produits physiques en retard).
+    Les lignes service (blue) n'influent PAS sur la couleur rouge.
+    """
     today = date.today()
-    orange = grey = white = green = 0
+    orange = grey = white = green = blue_service = 0
     formatted = []
 
     analytic_id = project["analytic_account_id"][0] if project.get("analytic_account_id") else None
     if not analytic_id:
-        return {"orange": 0, "grey": 0, "white": 0, "green": 0, "total": 0}, []
+        return {"orange": 0, "grey": 0, "white": 0, "green": 0, "blue": 0, "total": 0}, []
 
     analytic_str = str(analytic_id)
 
@@ -246,20 +245,19 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
         else:
             dp = None
 
-        pid = l["product_id"][0] if l.get("product_id") else None
-        policy = policy_map.get(pid, "")
+        pid_prod = l["product_id"][0] if l.get("product_id") else None
+        prod_type = policy_map.get(pid_prod, "")
+        is_service = (prod_type == "service")
 
         if qty_r >= qty_o:
-            color = "#2E7D32"; rank = 3; green += 1
+            color = "#2E7D32"; rank = 4; green += 1
         elif qty_r > 0:
             color = "#FFA000"; rank = 0; orange += 1
         elif dp and dp < today:
-            # 🔵 Services en retard → bleu au lieu de gris
-            if policy == "service":
-                color = "#1565C0"
+            if is_service:
+                color = "#1565C0"; rank = 3; blue_service += 1
             else:
-                color = "#757575"
-            rank = 1; grey += 1
+                color = "#757575"; rank = 1; grey += 1
         else:
             color = "#FFFFFF"; rank = 2; white += 1
 
@@ -273,7 +271,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             "Planned Date": dp,
             "Color": color,
             "Rank": rank,
-            "Policy": policy,
+            "IsService": is_service,
         })
 
     formatted.sort(key=lambda x: x["Rank"])
@@ -283,9 +281,104 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
         "grey": grey,
         "white": white,
         "green": green,
-        "total": orange + grey + white + green
+        "blue": blue_service,
+        "total": orange + grey + white + green + blue_service
     }
     return summary, formatted
+
+
+# ============================================================
+# 📊 ANALYTICS LOADER
+# ============================================================
+
+@st.cache_data(ttl=300)
+def load_analytics_for_projects(_uid, _models, project_list):
+    """
+    Pour chaque projet, calcule depuis les comptes analytiques :
+      - CA total   : somme des lignes SO confirmées liées au compte
+      - Dépenses   : somme des lignes analytiques négatives (charges)
+      - Facturé    : montant déjà facturé (qty_invoiced * price_unit sur les SO)
+      - À facturer : CA total - Facturé
+      - Marge C    : CA total - Dépenses
+    """
+    uid, models = _uid, _models
+
+    analytic_ids = [
+        p["analytic_account_id"][0]
+        for p in project_list
+        if p.get("analytic_account_id")
+    ]
+    if not analytic_ids:
+        return {}
+
+    # --- Lignes analytiques réelles (charges) ---
+    analytic_lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.line", "search_read",
+        [[("account_id", "in", analytic_ids)]],
+        {"fields": ["account_id", "amount"]}
+    )
+
+    spend_map = {}
+    for line in analytic_lines:
+        aid = line["account_id"][0]
+        amt = line["amount"]
+        if amt < 0:
+            spend_map[aid] = spend_map.get(aid, 0.0) + abs(amt)
+
+    # --- Budget vendu + facturé : via sale.order.line ---
+    so_lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "sale.order.line", "search_read",
+        [[
+            ("order_id.state", "in", ["sale", "done"]),
+            ("analytic_distribution", "!=", False),
+        ]],
+        {"fields": ["price_subtotal", "analytic_distribution",
+                    "qty_invoiced", "price_unit", "product_uom_qty"]}
+    )
+
+    sold_map = {}
+    invoiced_map = {}
+    for sl in so_lines:
+        dist = sl.get("analytic_distribution") or {}
+        for aid_str, pct in dist.items():
+            try:
+                aid = int(aid_str)
+            except ValueError:
+                continue
+            if aid not in analytic_ids:
+                continue
+            ratio = pct / 100.0
+            sold_map[aid] = sold_map.get(aid, 0.0) + sl["price_subtotal"] * ratio
+            already_inv = sl["qty_invoiced"] * sl["price_unit"]
+            invoiced_map[aid] = invoiced_map.get(aid, 0.0) + already_inv * ratio
+
+    # --- Résultat par projet ---
+    result = {}
+    for p in project_list:
+        if not p.get("analytic_account_id"):
+            result[p["id"]] = None
+            continue
+        aid = p["analytic_account_id"][0]
+
+        ca_total   = sold_map.get(aid, 0.0)
+        depenses   = spend_map.get(aid, 0.0)
+        facture    = invoiced_map.get(aid, 0.0)
+        a_facturer = max(ca_total - facture, 0.0)
+        marge_c    = ca_total - depenses
+        marge_pct  = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
+
+        result[p["id"]] = {
+            "ca_total":   ca_total,
+            "depenses":   depenses,
+            "facture":    facture,
+            "a_facturer": a_facturer,
+            "marge_c":    marge_c,
+            "marge_pct":  marge_pct,
+        }
+
+    return result
 
 
 # ============================================================
@@ -310,17 +403,17 @@ COLOR_ORDER = [
 ]
 
 COLOR_MAP = {
-    "Soudure": "#1E88E5",
-    "Peinture": "#FDD835",
-    "Assemblage": "#43A047",
-    "Câblage": "#8E24AA",
-    "Test": "#FB8C00",
-    "Montage": "#E53935",
-    "Mise en service": "#EC407A",
-    "Réception": "#6D4C41",
-    "Transport": "#00ACC1",
-    "Etude": "#34ebc6",
-    "Autres": "#9E9E9E"
+    "Soudure":        "#1E88E5",
+    "Peinture":       "#FDD835",
+    "Assemblage":     "#43A047",
+    "Câblage":        "#8E24AA",
+    "Test":           "#FB8C00",
+    "Montage":        "#E53935",
+    "Mise en service":"#EC407A",
+    "Réception":      "#6D4C41",
+    "Transport":      "#00ACC1",
+    "Etude":          "#34ebc6",
+    "Autres":         "#9E9E9E"
 }
 
 
@@ -333,9 +426,9 @@ def classify_task_type(name):
     if "test" in n: return "Test"
     if "montage" in n or "installation" in n: return "Montage"
     if "mise en service" in n or "mes" in n: return "Mise en service"
-    if "récept" in n or "recept" in n or "assistance" in n : return "Réception"
+    if "récept" in n or "recept" in n or "assistance" in n: return "Réception"
     if "transport" in n: return "Transport"
-    if "étude" in n or "etude" in n or "conception" in n  or "plan" in n or "calcul" in n: return "Etude"
+    if "étude" in n or "etude" in n or "conception" in n or "plan" in n or "calcul" in n: return "Etude"
     return "Autres"
 
 
@@ -389,6 +482,10 @@ def project_label(p):
     return f"{client} - {desc_short}"
 
 
+def fmt_eur(val):
+    return f"{val:,.0f} €".replace(",", " ")
+
+
 # ============================================================
 # 🔵 STREAMLIT APP
 # ============================================================
@@ -398,17 +495,13 @@ def main():
 
     if "filter_standard" not in st.session_state:
         st.session_state["filter_standard"] = False
-    
+
     st.markdown("""
     <style>
     .block-container { padding-top: 0.5rem !important; }
-    /* Style pour les toggles de filtre */
-    div[data-testid="stToggle"] > label {
-        font-size: 13px !important;
-    }
+    div[data-testid="stToggle"] > label { font-size: 13px !important; }
     </style>
     """, unsafe_allow_html=True)
-    
 
     try:
         uid, models = connect_odoo()
@@ -416,14 +509,12 @@ def main():
         st.error(f"Connexion Odoo impossible : {e}")
         return
 
-    # 🔁 Refresh toutes les 10 minutes
     st_autorefresh(interval=600000, key="refresh_10min")
 
     if "months" not in st.session_state:
         st.session_state["months"] = 3
     if "selected_purchase_project_id" not in st.session_state:
         st.session_state["selected_purchase_project_id"] = None
-    # Toggles filtre Gantt — actifs par défaut
     if "filter_engineering" not in st.session_state:
         st.session_state["filter_engineering"] = True
     if "filter_standard" not in st.session_state:
@@ -434,35 +525,30 @@ def main():
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
         st.markdown(
-        "<div style='text-align:left;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
-        unsafe_allow_html=True
-    )
+            "<div style='text-align:left;color:green;font-weight:bold;margin-top:20px;'>🟢 Connecté à Odoo</div>",
+            unsafe_allow_html=True
+        )
     with col2:
         st.markdown(
             "<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
             unsafe_allow_html=True
         )
-    with col3: 
-        # ---------- TOGGLES DE FILTRE ----------
-        #st.markdown("**Filtres projets**")
-        
+    with col3:
         filter_engineering = st.toggle(
-                "🔵 Engineering (PRO LIG)",
-                value=st.session_state["filter_engineering"],
-                key="toggle_engineering"
+            "🔵 Engineering (PRO LIG)",
+            value=st.session_state["filter_engineering"],
+            key="toggle_engineering"
         )
         filter_standard = st.toggle(
-                "⚪ Standard (PRO LIG)",
-                value=st.session_state["filter_standard"],
-                key="toggle_standard"
-            )
+            "⚪ Standard (PRO LIG)",
+            value=st.session_state["filter_standard"],
+            key="toggle_standard"
+        )
 
-        # Empêcher de tout désactiver
         if not filter_engineering and not filter_standard:
             st.warning("⚠️ Au moins un filtre doit être actif.")
             filter_engineering = True
 
-        # Déterminer le mode de filtre à passer à load_projects
         if filter_engineering and filter_standard:
             filter_mode = "both"
         elif filter_engineering:
@@ -470,22 +556,18 @@ def main():
         else:
             filter_mode = "standard"
 
-        # Mettre à jour session_state si changement
         if (filter_engineering != st.session_state["filter_engineering"] or
                 filter_standard != st.session_state["filter_standard"]):
             st.session_state["filter_engineering"] = filter_engineering
             st.session_state["filter_standard"] = filter_standard
             st.rerun()
 
-    tab1, tab2 = st.tabs(["📅 Planning", "📦 Purchases"])
+    tab1, tab2, tab3 = st.tabs(["📅 Planning", "📦 Purchases", "📊 Analytique"])
+
     # ============================================================
     # 🟦 ONGLET 1 — MASTER PLANNING
     # ============================================================
     with tab1:
-
-
-
-        # 🔥 Projets depuis le cache (avec le mode de filtre)
         projects = load_projects(uid, models, filter_mode)
         project_ids = [p['id'] for p in projects]
 
@@ -496,7 +578,6 @@ def main():
 
         st.subheader("📊 Gantt")
 
-        # Construction du Gantt avec anti-chevauchement
         gantt_data = []
         overlap_counter = {}
 
@@ -507,13 +588,10 @@ def main():
             label = project_label(proj)
             deadline = t["date_deadline"]
 
-            # Clé unique projet + semaine ISO pour détecter les chevauchements
             week_key = (label, deadline.isocalendar()[1], deadline.year)
             count = overlap_counter.get(week_key, 0)
             overlap_counter[week_key] = count + 1
-
-            # Décaler légèrement la date pour éviter l'empilement
-            offset_days = count * 1  # 1 jour de décalage par conflit
+            offset_days = count * 1
 
             gantt_data.append({
                 "Tâche": t["name"],
@@ -525,7 +603,6 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
-            # Trier les projets par numéro (Sxx-xxxxx)
             df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
             df_gantt = df_gantt.sort_values(by="code")
             df_gantt["Type détaillé"] = pd.Categorical(
@@ -548,8 +625,7 @@ def main():
             fig.update_yaxes(autorange="reversed")
 
             n_proj = len(df_gantt["Projet"].unique())
-            row_height = 18
-            chart_height = max(500, n_proj * row_height + 140)
+            chart_height = max(500, n_proj * 18 + 140)
 
             today = date.today()
             start_view = today
@@ -561,61 +637,30 @@ def main():
                 bargap=0.3,
                 bargroupgap=0.1,
                 margin=dict(l=20, r=20, t=40, b=20),
-                yaxis=dict(
-                    tickfont=dict(size=12),
-                    showgrid=True,
-                    gridcolor="rgba(180,180,180,0.18)",
-                    gridwidth=1,
-                ),
-                xaxis=dict(
-                    showgrid=False,
-                ),
+                yaxis=dict(tickfont=dict(size=12), showgrid=True,
+                           gridcolor="rgba(180,180,180,0.18)", gridwidth=1),
+                xaxis=dict(showgrid=False),
                 plot_bgcolor="rgba(0,0,0,0)",
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="center",
-                    x=0.5,
-                    font=dict(size=10)
-                )
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="center", x=0.5, font=dict(size=10))
             )
 
-            # Ligne "aujourd'hui"
-            fig.add_vline(
-                x=today,
-                line_width=2,
-                line_color="white",
-                opacity=0.9
-            )
+            fig.add_vline(x=today, line_width=2, line_color="white", opacity=0.9)
 
-            # Barres verticales pointillées au 1er de chaque mois
             cur = date(today.year, today.month, 1)
             while True:
-                if cur.month == 12:
-                    cur = date(cur.year + 1, 1, 1)
-                else:
-                    cur = date(cur.year, cur.month + 1, 1)
+                cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
                 if cur > end_view:
                     break
-                fig.add_vline(
-                    x=cur,
-                    line_width=1,
-                    line_dash="dot",
-                    line_color="rgba(200,200,200,0.35)",
-                )
+                fig.add_vline(x=cur, line_width=1, line_dash="dot",
+                              line_color="rgba(200,200,200,0.35)")
 
             fig.update_xaxes(range=[start_view, end_view])
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"displaylogo": False}
-            )
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
 
-        # Slider SOUS le Gantt
         col_s1, col_s2 = st.columns([3, 1])
         with col_s1:
             new_months = st.slider("", 1, 6, months)
@@ -629,7 +674,6 @@ def main():
             st.session_state["months"] = new_months
             st.rerun()
 
-        # Recherche des tâches par projet
         st.subheader("🔍 Tâches du projet")
         project_labels = {project_label(p): p["id"] for p in projects}
         selected_label = st.selectbox(
@@ -659,9 +703,7 @@ def main():
     with tab2:
         st.markdown("### 📦 Purchases par projet")
 
-        # Projets complets (les deux filtres actifs pour les purchases)
         projects_all = load_projects(uid, models, filter_mode)
-
         po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
 
         purchase_data = {}
@@ -683,18 +725,22 @@ def main():
                     summary = purchase_data[p['id']]["summary"]
                     total = summary["total"]
                     total_safe = max(total, 1)
-                    non_green = total - summary["green"]
-                    pct_orange = 100 * summary["orange"] / total_safe
-                    pct_grey = 100 * summary["grey"] / total_safe
-                    pct_white = 100 * summary["white"] / total_safe
-                    pct_green = 100 * summary["green"] / total_safe
 
-                    if non_green == 0:
-                        text_color = "white"
-                    elif summary["grey"] > 0:
+                    # Progress bar : orange | grey | white | blue | green
+                    pct_orange = 100 * summary["orange"] / total_safe
+                    pct_grey   = 100 * summary["grey"]   / total_safe
+                    pct_white  = 100 * summary["white"]  / total_safe
+                    pct_blue   = 100 * summary["blue"]   / total_safe
+                    pct_green  = 100 * summary["green"]  / total_safe
+
+                    # Couleur du compteur : rouge si produit physique en retard (grey > 0)
+                    # Les services bleus n'influent PAS sur le rouge
+                    if summary["grey"] > 0:
                         text_color = "red"
-                    else:
+                    elif summary["orange"] > 0:
                         text_color = "#FFA000"
+                    else:
+                        text_color = "white"
 
                     if st.button(
                         f"{client}\n {desc_short_25}",
@@ -705,17 +751,13 @@ def main():
                     st.markdown(
                         f"""
                         <div style="
-                            width:100%;
-                            height:12px;
-                            border-radius:6px;
-                            overflow:hidden;
-                            display:flex;
-                            margin-top:4px;
-                            border:1px solid #444;
+                            width:100%;height:12px;border-radius:6px;
+                            overflow:hidden;display:flex;margin-top:4px;border:1px solid #444;
                         ">
                             <div style="width:{pct_orange}%;background:#FFA000;"></div>
                             <div style="width:{pct_grey}%;background:#757575;"></div>
                             <div style="width:{pct_white}%;background:#FFFFFF;"></div>
+                            <div style="width:{pct_blue}%;background:#1565C0;"></div>
                             <div style="width:{pct_green}%;background:#2E7D32;"></div>
                         </div>
                         <div style="text-align:right;font-size:12px;color:{text_color};margin-top:2px;">
@@ -750,24 +792,15 @@ def main():
                     st.markdown(f"**Total lignes : {len(lines)}**")
                     for row in lines:
                         date_display = row['Planned Date'].strftime("%d-%m-%Y") if row['Planned Date'] else "—"
-                        # Texte blanc sur fond bleu foncé, noir sur les autres couleurs
                         text_color_line = "white" if row['Color'] in ("#1565C0", "#2E7D32", "#757575") else "black"
                         st.markdown(
                             f"""
                             <div style="
-                                background:{row['Color']};
-                                padding:8px 12px;
-                                border-radius:4px;
-                                margin-bottom:5px;
-                                border:1px solid #555;
-                                font-size:14px;
-                                color:{text_color_line};
-                                display:grid;
+                                background:{row['Color']};padding:8px 12px;border-radius:4px;
+                                margin-bottom:5px;border:1px solid #555;font-size:14px;
+                                color:{text_color_line};display:grid;
                                 grid-template-columns: 90px 190px 1fr 80px 90px 110px;
-                                column-gap:12px;
-                                text-align:left;
-                                align-items:center;
-                                line-height:1.3;
+                                column-gap:12px;text-align:left;align-items:center;line-height:1.3;
                             ">
                                 <div style="white-space:nowrap;"><b>PO:</b> {row['PO']}</div>
                                 <div style="white-space:nowrap;"><b>Buyer:</b> {row['Buyer']}</div>
@@ -780,26 +813,132 @@ def main():
                             unsafe_allow_html=True
                         )
 
+    # ============================================================
+    # 🟨 ONGLET 3 — ANALYTIQUE
+    # ============================================================
+    with tab3:
+        st.markdown("### 📊 Bilan analytique par projet")
+
+        projects_ana = load_projects(uid, models, filter_mode)
+
+        with st.spinner("Chargement des données analytiques…"):
+            analytics = load_analytics_for_projects(uid, models, projects_ana)
+
+        if not analytics:
+            st.info("Aucune donnée analytique disponible.")
+        else:
+            rows = []
+            for p in projects_ana:
+                ana = analytics.get(p["id"])
+                if ana is None:
+                    continue
+                code = extract_project_code(p["display_name"])
+                rows.append({
+                    "Code":           code or p.get("name", "—"),
+                    "Client":         p["company"],
+                    "Projet":         short_desc(clean_description_from_display_name(p["display_name"]), 40),
+                    "CA total (€)":   ana["ca_total"],
+                    "Dépenses (€)":   ana["depenses"],
+                    "Facturé (€)":    ana["facture"],
+                    "À facturer (€)": ana["a_facturer"],
+                    "Marge C (€)":    ana["marge_c"],
+                    "Marge C (%)":    ana["marge_pct"],
+                })
+
+            if not rows:
+                st.info("Aucune ligne analytique trouvée pour ces projets.")
+            else:
+                df_ana = pd.DataFrame(rows)
+
+                # Totaux
+                total_ca      = df_ana["CA total (€)"].sum()
+                total_dep     = df_ana["Dépenses (€)"].sum()
+                total_fac     = df_ana["Facturé (€)"].sum()
+                total_afac    = df_ana["À facturer (€)"].sum()
+                total_marge   = df_ana["Marge C (€)"].sum()
+                total_marge_p = (total_marge / total_ca * 100) if total_ca > 0 else 0.0
+
+                # Métriques résumé
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("CA Total",     fmt_eur(total_ca))
+                m2.metric("Dépenses",     fmt_eur(total_dep))
+                m3.metric("À facturer",   fmt_eur(total_afac))
+                m4.metric(
+                    "Marge C globale",
+                    fmt_eur(total_marge),
+                    delta=f"{total_marge_p:.1f} %"
+                )
+
+                st.markdown("---")
+
+                # Tableau formaté
+                df_display = df_ana.copy()
+                fmt_cols = ["CA total (€)", "Dépenses (€)", "Facturé (€)", "À facturer (€)", "Marge C (€)"]
+                for col in fmt_cols:
+                    df_display[col] = df_display[col].apply(lambda x: f"{x:,.0f} €".replace(",", " "))
+                df_display["Marge C (%)"] = df_display["Marge C (%)"].apply(lambda x: f"{x:.1f} %")
+
+                st.dataframe(
+                    df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Code":           st.column_config.TextColumn("Code",        width=90),
+                        "Client":         st.column_config.TextColumn("Client",      width=120),
+                        "Projet":         st.column_config.TextColumn("Projet",      width=200),
+                        "CA total (€)":   st.column_config.TextColumn("CA Total",    width=110),
+                        "Dépenses (€)":   st.column_config.TextColumn("Dépenses",   width=110),
+                        "Facturé (€)":    st.column_config.TextColumn("Facturé",     width=110),
+                        "À facturer (€)": st.column_config.TextColumn("À facturer", width=110),
+                        "Marge C (€)":    st.column_config.TextColumn("Marge C (€)",width=110),
+                        "Marge C (%)":    st.column_config.TextColumn("Marge C (%)", width=90),
+                    }
+                )
+
+                # Graphique marge C par projet
+                st.markdown("#### Marge C par projet")
+                df_chart = df_ana[df_ana["CA total (€)"] > 0].copy()
+                df_chart = df_chart.sort_values("Marge C (%)", ascending=True)
+                df_chart["Statut marge"] = df_chart["Marge C (%)"].apply(
+                    lambda x: "Négative" if x < 0 else ("Bonne (>20%)" if x >= 20 else "Standard")
+                )
+
+                fig_marge = px.bar(
+                    df_chart,
+                    x="Marge C (%)",
+                    y="Code",
+                    orientation="h",
+                    color="Statut marge",
+                    color_discrete_map={
+                        "Négative":     "#e53935",
+                        "Standard":     "#FB8C00",
+                        "Bonne (>20%)": "#43a047",
+                    },
+                    hover_data={"Marge C (€)": True, "CA total (€)": True, "Client": True},
+                    height=max(350, len(df_chart) * 22 + 80),
+                )
+                fig_marge.update_layout(
+                    margin=dict(l=10, r=20, t=20, b=20),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(tickfont=dict(size=11)),
+                    legend=dict(orientation="h", y=1.05, x=0),
+                )
+                fig_marge.add_vline(x=0,  line_width=1, line_color="white", opacity=0.5)
+                fig_marge.add_vline(x=20, line_width=1, line_dash="dot",
+                                    line_color="rgba(200,200,200,0.4)")
+                st.plotly_chart(fig_marge, use_container_width=True, config={"displaylogo": False})
+
     # ---------- FOOTER ----------
     st.markdown("""
     <style>
     .footer {
-        position: fixed;
-        left: 0;
-        bottom: 0;
-        width: 100%;
-        background-color: rgba(240,240,240,0.85);
-        color: #333;
-        text-align: center;
-        padding: 6px 0;
-        font-size: 14px;
-        border-top: 1px solid #ccc;
-        z-index: 9999;
+        position: fixed; left: 0; bottom: 0; width: 100%;
+        background-color: rgba(240,240,240,0.85); color: #333;
+        text-align: center; padding: 6px 0; font-size: 14px;
+        border-top: 1px solid #ccc; z-index: 9999;
     }
     </style>
-    <div class="footer">
-        C Flow - Powered by Olsen-Engineering
-    </div>
+    <div class="footer">C Flow - Powered by Olsen-Engineering</div>
     """, unsafe_allow_html=True)
 
 
