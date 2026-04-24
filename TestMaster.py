@@ -247,7 +247,10 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             else:
                 color = "#757575"; rank = 1; grey += 1
         else:
-            color = "#FFFFFF"; rank = 2; white += 1
+            if is_service:
+                color = "#1565C0"; rank = 3; blue_service += 1
+            else:
+                color = "#FFFFFF"; rank = 2; white += 1
 
         po_id = l["order_id"][0]
         formatted.append({
@@ -426,14 +429,15 @@ def load_analytics_data(_uid, _models, project_list):
         code = account_code_map.get(acc_id, "")
 
         if not code:
+            print('No code')
             continue
-
+        print("code")
         # --- Comptes de dépense (classe 6) ---
-        if code.startswith("6"):
+        if code.startswith("6") or code.startswith("3"):
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + amt
 
         # --- Comptes de revenu (classe 7) ---
-        elif code.startswith("7"):
+        elif code.startswith("7") or code.startswith("4"):
             facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
 
         # --- Comptes 3/4/5 ignorés ---
