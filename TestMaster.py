@@ -346,15 +346,16 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 @st.cache_data(ttl=300)
 def load_analytics_data(_uid, _models, project_list):
     """
-    Charge tout ce qu’il faut pour l’onglet analytique, en mode robuste + optimisé.
-
-    - Gère correctement les notes de crédit (out_refund / in_refund)
-    - Limite la taille des requêtes Odoo (batch sur les comptes analytiques)
-    - Évite de recalculer 15 fois les mêmes choses
+    Version robuste + compatible toutes versions Odoo.
+    Gère :
+      - in_invoice / in_refund (fournisseurs)
+      - out_invoice / out_refund (clients)
+      - lignes analytiques sans move_id
+      - batching pour éviter les Fault
     """
     uid, models = _uid, _models
 
-    # --- 0. Récup des comptes analytiques liés aux projets ---
+    # --- Comptes analytiques des projets ---
     analytic_ids = [
         p["analytic_account_id"][0]
         for p in project_list
@@ -368,8 +369,7 @@ def load_analytics_data(_uid, _models, project_list):
     year_end   = f"{year_now}-12-31"
 
     # =========================================================
-    # 1) LIGNES ANALYTIQUES (toutes années) EN BATCH
-    #    + récupération move_id pour aller chercher move_type
+    # 1) LIGNES ANALYTIQUES EN BATCH
     # =========================================================
     def fetch_analytic_lines_batch(models, uid, analytic_ids, batch_size=80):
         all_lines = []
@@ -380,12 +380,19 @@ def load_analytics_data(_uid, _models, project_list):
                     DB, uid, PASSWORD,
                     "account.analytic.line", "search_read",
                     [[("account_id", "in", sub_ids)]],
-                    {"fields": ["account_id", "amount", "date", "move_id"]}
+                    {
+                        "fields": [
+                            "account_id",
+                            "amount",
+                            "date",
+                            "move_id",        # v14+
+                            "move_line_id"    # v12/v13
+                        ]
+                    }
                 )
                 all_lines.extend(lines)
             except Exception as e:
-                # En cas de problème sur un batch, on log et on continue
-                print(f"[WARN] Erreur sur batch analytic_ids {sub_ids[:5]}... : {e}")
+                print(f"[WARN] Erreur batch analytic_ids {sub_ids[:5]} : {e}")
         return all_lines
 
     all_lines = fetch_analytic_lines_batch(models, uid, analytic_ids)
@@ -394,25 +401,28 @@ def load_analytics_data(_uid, _models, project_list):
     facture_all_map  = {}
 
     # =========================================================
-    # 2) RÉCUPÉRATION DES move_type VIA move_id
-    #    analytic.line -> account.move.line -> account.move
+    # 2) RÉCUPÉRATION DES move_id (account.move)
     # =========================================================
-    move_line_ids = {
-        l["move_id"][0]
-        for l in all_lines
-        if l.get("move_id")
-    }
-    move_line_map = {}
-    move_type_map = {}
+    # On récupère d'abord les move_line_id (account.move.line)
+    move_line_ids = set()
+    for l in all_lines:
+        if l.get("move_id"):
+            move_line_ids.add(l["move_id"][0])
+        elif l.get("move_line_id"):
+            move_line_ids.add(l["move_line_id"][0])
+
+    move_line_map = {}   # move_line_id → move_id
+    move_type_map = {}   # move_id → move_type
 
     if move_line_ids:
-        # a) account.move.line : pour récupérer move_id (account.move)
+        # a) Lire account.move.line → move_id
         move_lines = models.execute_kw(
             DB, uid, PASSWORD,
             "account.move.line", "read",
             [list(move_line_ids)],
             {"fields": ["id", "move_id"]}
         )
+
         move_ids = set()
         for ml in move_lines:
             ml_id = ml["id"]
@@ -422,7 +432,7 @@ def load_analytics_data(_uid, _models, project_list):
                 move_line_map[ml_id] = move_id
                 move_ids.add(move_id)
 
-        # b) account.move : pour récupérer move_type
+        # b) Lire account.move → move_type
         if move_ids:
             moves = models.execute_kw(
                 DB, uid, PASSWORD,
@@ -433,40 +443,48 @@ def load_analytics_data(_uid, _models, project_list):
             move_type_map = {m["id"]: m.get("move_type", "") for m in moves}
 
     # =========================================================
-    # 3) AGRÉGATION DÉPENSES / FACTURÉ AVEC GESTION DES NOTES DE CRÉDIT
+    # 3) CLASSIFICATION DÉPENSES / FACTURÉ
     # =========================================================
     for line in all_lines:
         if not line.get("account_id"):
             continue
+
         aid = line["account_id"][0]
         amt = line["amount"]
 
-        move_line_id = line["move_id"][0] if line.get("move_id") else None
+        # --- Détection du move_line_id selon version Odoo ---
+        move_line_id = None
+        if line.get("move_id"):
+            move_line_id = line["move_id"][0]
+        elif line.get("move_line_id"):
+            move_line_id = line["move_line_id"][0]
+
+        # --- move_id (account.move) ---
         move_id = move_line_map.get(move_line_id)
         move_type = move_type_map.get(move_id, "")
 
-        # Si on n’a pas de move_type (cas rare), on retombe sur l’ancienne logique
-        if not move_type:
-            if amt < 0:
-                depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
-            elif amt > 0:
-                facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + amt
-            continue
-
-        # --- Vendor bills / notes de crédit fournisseur ---
+        # --- Classification ---
         if move_type == "in_invoice":          # facture fournisseur
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
+
         elif move_type == "in_refund":         # note de crédit fournisseur
             depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) - abs(amt)
 
-        # --- Customer invoices / notes de crédit client ---
         elif move_type == "out_invoice":       # facture client
-            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) + abs(amt)
+            facture_all_map[aid] = facture_all_map.get(aid, 0.0) + abs(amt)
+
         elif move_type == "out_refund":        # note de crédit client
-            facture_all_map[aid]  = facture_all_map.get(aid, 0.0) - abs(amt)
+            facture_all_map[aid] = facture_all_map.get(aid, 0.0) - abs(amt)
+
+        else:
+            # --- Fallback intelligent ---
+            if amt < 0:
+                depenses_all_map[aid] = depenses_all_map.get(aid, 0.0) + abs(amt)
+            elif amt > 0:
+                facture_all_map[aid] = facture_all_map.get(aid, 0.0) + amt
 
     # =========================================================
-    # 4) CA via sale.order (toutes années + année en cours)
+    # 4) CA via sale.order
     # =========================================================
     code_to_proj = {}
     for p in project_list:
@@ -478,20 +496,22 @@ def load_analytics_data(_uid, _models, project_list):
     ca_annee_map = {}
 
     if code_to_proj:
-        # On limite aux SO confirmées
         all_so = models.execute_kw(
             DB, uid, PASSWORD,
             "sale.order", "search_read",
             [[("state", "in", ["sale", "done"])]],
             {"fields": ["id", "name", "amount_untaxed", "date_order"]}
         )
+
         for so in all_so:
             so_code = extract_project_code(so["name"])
             if not so_code:
                 continue
+
             proj = code_to_proj.get(so_code)
             if not proj or not proj.get("analytic_account_id"):
                 continue
+
             aid = proj["analytic_account_id"][0]
             amt = so["amount_untaxed"]
 
@@ -502,19 +522,21 @@ def load_analytics_data(_uid, _models, project_list):
                 ca_annee_map[aid] = ca_annee_map.get(aid, 0.0) + amt
 
     # =========================================================
-    # 5) SYNTHÈSE PAR PROJET (même structure que ta version)
+    # 5) SYNTHÈSE PAR PROJET
     # =========================================================
     result = {}
     for p in project_list:
         if not p.get("analytic_account_id"):
             result[p["id"]] = None
             continue
+
         aid = p["analytic_account_id"][0]
 
         ca_total     = ca_all_map.get(aid, 0.0)
         ca_annee     = ca_annee_map.get(aid, 0.0)
         dep_all      = depenses_all_map.get(aid, 0.0)
         fact_all     = facture_all_map.get(aid, 0.0)
+
         a_facturer   = max(ca_total - fact_all, 0.0)
         marge_c      = ca_total - dep_all
         marge_pct    = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
@@ -540,6 +562,7 @@ def load_analytics_data(_uid, _models, project_list):
         }
 
     return result
+
 
 
 
