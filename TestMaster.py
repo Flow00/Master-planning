@@ -999,7 +999,7 @@ def main():
             p for p in projects_ana
             if not (
                 p.get("analytic_account_id")
-                and "PROJETS (LIG)" in p["analytic_account_id"][1].upper()
+                and "PROJETS (LIG)" in p["analytic_account_id"][1].upper() and "DEPANNAGES (LIG)" in p["analytic_account_id"][1].upper()
             )
         ]
         with st.spinner("Chargement des données analytiques…"):
