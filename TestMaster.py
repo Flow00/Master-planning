@@ -563,6 +563,21 @@ def load_all_analytics(_uid, _models, project_list):
                       .fillna(0))
         df_monthly = df_monthly.rename(columns={"Depenses": "Dépenses"})
 
+
+    # --- Nouveau calcul des dépenses annuelles basé sur l'histogramme ---
+    current_year = date.today().year
+    df_year = df_monthly[df_monthly["Mois"].dt.year == current_year]
+
+    depenses_annee_map = {}
+    for p in project_list:
+        if not p.get("analytic_account_id"):
+            depenses_annee_map[p["id"]] = 0
+            continue
+
+        aid = p["analytic_account_id"][0]
+        # somme des dépenses mensuelles pour ce compte analytique
+        depenses_annee_map[p["id"]] = df_year["Dépenses"].sum()
+        
     # ── 5) Synthèse par projet ──
     analytics_summary = {}
     for p in project_list:
@@ -600,8 +615,19 @@ def load_all_analytics(_uid, _models, project_list):
             "marge_pct":          marge_pct,
             "is_closed":          p.get("is_closed", False),
         }
+        
+    # --- Calcul de la marge moyenne sur les projets clôturés ---
+    closed_projects = [p for p in project_list if p.get("is_closed")]
 
-    return analytics_summary, df_monthly
+    marges = []
+    for p in closed_projects:
+        data = analytics_summary.get(p["id"])
+        if data and data["ca_total"] > 0 and data["marge_pct"] < 90:
+            marges.append(data["marge_pct"])
+
+    marge_moyenne_clotures = sum(marges) / len(marges) if marges else 0.0
+
+    return analytics_summary, df_monthly,marge_moyenne_clotures
 
 def build_weeks_horizon(months=3):
     start = date.today()
@@ -1075,7 +1101,7 @@ def main():
         projects_ana = load_projects_with_closed(uid, models, filter_mode)
 
         # Exclure comptes analytiques génériques
-        bad_accounts = ["dépannage (liège)", "projets (lig)", 'Vente pure (LIG)']
+        bad_accounts = ["dépannage (liège)", "projets (lig)", 'vente pure (LIG)']
         projects_ana = [
             p for p in projects_ana
             if not (
@@ -1086,7 +1112,7 @@ def main():
 
         with st.spinner("Chargement des données analytiques…"):
             # ── UN SEUL appel pour tout ──
-            analytics, df_monthly = load_all_analytics(uid, models, projects_ana)
+            analytics, df_monthly,marge_moyenne_clotures = load_all_analytics(uid, models, projects_ana)
 
         if not analytics:
             st.info("Aucune donnée analytique disponible.")
@@ -1111,11 +1137,11 @@ def main():
                 unsafe_allow_html=True
             )
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"CA {year_now}",    fmt_eur(sum_ca_annee))
-            m2.metric("Dépenses associées", fmt_eur(sum_dep_annee))
-            m3.metric("Marge attendue",     fmt_eur(sum_marge_att),
-                      delta=f"{marge_att_pct:.1f} %")
-            m4.metric("Reste à facturer",   fmt_eur(sum_a_fac))
+            m1.metric(f"Sales {year_now}",    fmt_eur(sum_ca_annee))
+            m2.metric(f"Purchases + Timesheets {year_now}", fmt_eur(sum_dep_annee))
+            m3.metric(label="Marge moyenne projets clôturés", value=f"{marge_moyenne_clotures:.1f} %"
+)
+            m4.metric("A facturer (Total)",   fmt_eur(sum_a_fac))
 
             st.markdown("---")
 
