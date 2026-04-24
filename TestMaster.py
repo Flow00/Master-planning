@@ -397,6 +397,26 @@ def load_analytics_for_projects(_uid, _models, project_list):
         elif amt > 0:
             facture_map[aid]  = facture_map.get(aid, 0.0) + amt
 
+        # ── NOUVEAU : Dépenses + Facturé toutes années ───────────────────────────────
+    all_lines = models.execute_kw(
+        DB, uid, PASSWORD,
+        "account.analytic.line", "search_read",
+        [[("account_id", "in", analytic_ids)]],
+        {"fields": ["account_id", "amount"]}
+    )
+    
+    depenses_all = {}
+    facture_all  = {}
+    
+    for line in all_lines:
+        aid = line["account_id"][0]
+        amt = line["amount"]
+        if amt < 0:
+            depenses_all[aid] = depenses_all.get(aid, 0.0) + abs(amt)
+        elif amt > 0:
+            facture_all[aid]  = facture_all.get(aid, 0.0) + amt
+
+    
     # ── 2. Facturé cumulé toutes années (pour calculer reste à facturer) ──────
     all_analytic_lines = models.execute_kw(
         DB, uid, PASSWORD,
@@ -453,13 +473,21 @@ def load_analytics_for_projects(_uid, _models, project_list):
         marge_pct      = (marge_c / ca_total * 100) if ca_total > 0 else 0.0
 
         result[p["id"]] = {
-            "ca_total":      ca_total,
-            "depenses":      depenses,
-            "facture":       facture_annee,
-            "a_facturer":    a_facturer,
-            "marge_c":       marge_c,
-            "marge_pct":     marge_pct,
-            "is_closed":     p.get("is_closed", False),
+            # Résumé (année en cours)
+            "depenses_annee": depenses,
+            "facture_annee":  facture_annee,
+        
+            # Tableau (toutes années)
+            "depenses_all":   depenses_all.get(aid, 0.0),
+            "facture_all":    facture_all.get(aid, 0.0),
+        
+            # Données globales
+            "ca_total":       ca_total,
+            "a_facturer":     max(ca_total - facture_all.get(aid, 0.0), 0.0),
+            "marge_c":        ca_total - depenses_all.get(aid, 0.0),
+            "marge_pct":      ((ca_total - depenses_all.get(aid, 0.0)) / ca_total * 100) if ca_total > 0 else 0.0,
+        
+            "is_closed":      p.get("is_closed", False),
         }
 
     return result
@@ -993,8 +1021,8 @@ def main():
                     "Client":         p["company"],
                     "Projet":         short_desc(clean_description_from_display_name(p["display_name"]), 40),
                     "CA total (€)":   ana["ca_total"],
-                    "Dépenses (€)":   ana["depenses"],
-                    "Facturé (€)":    ana["facture"],
+                    "Dépenses (€)":   ana["depenses_all"],
+                    "Facturé (€)":    ana["facture_all"],
                     "À facturer (€)": ana["a_facturer"],
                     "Marge C (€)":    ana["marge_c"],
                     "Marge C (%)":    ana["marge_pct"],
