@@ -415,7 +415,7 @@ def load_all_analytics(_uid, _models, project_list):
         if not p.get("is_closed"):
             continue
         d = summary.get(p["id"])
-        if not d or d["ca_total"] <= 0 or d["marge_pct"] > 70 or or d["marge_pct"] < -100:
+        if not d or d["ca_total"] <= 0 or d["marge_pct"] > 70 or d["marge_pct"] < -100:
             continue
         sum_bene += d["marge_c"]
         sum_ca   += d["ca_total"]
