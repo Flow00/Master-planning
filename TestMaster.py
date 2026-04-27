@@ -159,7 +159,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     closed_stages = set()
     if all_stage_ids:
         stages = models.execute_kw(DB, uid, PASSWORD, 'project.task.type', 'read',
-            [all_stage_ids], {'fields': ['id', 'name', 'is_closed']})
+            [all_stage_ids], {'fields': ['id', 'name']})
         name_done = {'done', 'termine', 'terminee', 'fini', 'finie', 'closed', 'annule', 'cancelled'}
         for s in stages:
             if s.get('is_closed') or s.get('name', '').lower().strip() in name_done:
@@ -509,7 +509,7 @@ def main():
     st_autorefresh(interval=600000, key="refresh_10min")
 
     for k, v in [("months", 3), ("selected_purchase_project_id", None),
-                 ("filter_engineering", True), ("filter_standard", True)]:
+                 ("filter_engineering", True), ("filter_standard", False)]:
         if k not in st.session_state:
             st.session_state[k] = v
 
