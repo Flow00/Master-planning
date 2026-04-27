@@ -88,7 +88,7 @@ def load_projects(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
 
-    base = [('stage_id.name', 'not in', ['Cloture', 'Cloture', 'Template', 'Annule', 'Annule'])]
+    base = [('stage_id.name', 'not in', ['Cloturé', 'Cloture', 'Template', 'Annulé', 'Annule'])]
     if filter_mode == "engineering":
         domain = base + [('tag_ids', 'in', eng), ('tag_ids', 'in', prol)]
     elif filter_mode == "standard":
@@ -160,7 +160,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     if all_stage_ids:
         stages = models.execute_kw(DB, uid, PASSWORD, 'project.task.type', 'read',
             [all_stage_ids], {'fields': ['id', 'name']})
-        name_done = {'done', 'termine', 'terminee', 'fini', 'finie', 'closed', 'annule', 'cancelled'}
+        name_done = {'done', 'terminé', 'terminée', 'fini', 'finie', 'closed', 'annulé', 'cancelled'}
         for s in stages:
             if s.get('is_closed') or s.get('name', '').lower().strip() in name_done:
                 closed_stages.add(s['id'])
@@ -231,7 +231,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
                 color, rank, key = "#757575", 1, "grey"
         else:
             if is_service:
-                color, rank, key = "#1565C0", 3, "blue"
+                color, rank, key = "#156500", 3, "blue"
             else:
                 color, rank, key = "#FFFFFF", 2, "white"
 
@@ -669,7 +669,7 @@ def main():
                 for t in tlist:
                     wd      = t["date_deadline"].weekday()
                     we_flag = " **[WE]**" if wd >= 5 else ""
-                    done    = " (Termine)" if t.get("is_done") else ""
+                    done    = " (Terminé)" if t.get("is_done") else ""
                     st.write(f"- **{t['name']}**{done}{we_flag} — {t['date_deadline'].strftime('%d-%m-%Y')}")
             else:
                 st.info("Aucune tache pour ce projet.")
@@ -744,7 +744,7 @@ def main():
         st.markdown("### Bilan analytique")
 
         projects_ana = load_projects_with_closed(uid, models, fm)
-        bad_accs = ["depannage (liege)", "projets (lig)", "vente pure (lig)"]
+        bad_accs = ["dépannage (liège)", "projets (lig)", "vente pure (lig)"]
         projects_ana = [p for p in projects_ana
                         if not (p.get("analytic_account_id")
                                 and p["analytic_account_id"][1].lower() in bad_accs)]
@@ -766,17 +766,17 @@ def main():
         s_fac = sum(analytics[p["id"]]["a_facturer_annee"] for p in actifs)
 
         st.markdown(f"<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
-                    f"Projets confirmes {year_now} (actifs)</div>", unsafe_allow_html=True)
+                    f"Statistiques génrales", unsafe_allow_html=True)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"Sales {year_now}", fmt_eur(s_ca))
         m2.metric(f"Achats+Timesheets {year_now}", fmt_eur(s_dep))
-        m3.metric("Marge reelle (clotures)", f"{marge_pond:.1f} %",
-                  help="Somme benefices / Somme CA, projets clotures")
+        m3.metric("Marge restimée (cloturés)", f"{marge_pond:.1f} %",
+                  help="Somme bénéfices / Somme CA, projets clotures")
         m4.metric("A facturer (annee)", fmt_eur(s_fac))
 
         st.markdown("---")
-        st.markdown("#### Detail par projet")
+        st.markdown("#### Détail par projet")
 
         rows = []
         for p in projects_ana:
@@ -854,7 +854,7 @@ def main():
             st.markdown("#### Evolution CA facture & Depenses — 12 derniers mois")
 
             if df_monthly.empty:
-                st.info("Pas de donnees mensuelles.")
+                st.info("Pas de données mensuelles.")
             else:
                 dm = df_monthly.copy()
                 dm["Mois_label"] = pd.to_datetime(dm["Mois"]).dt.strftime("%b %Y")
