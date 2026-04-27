@@ -876,11 +876,18 @@ def main():
                                    bargap=0.2, bargroupgap=0.05)
                 st.plotly_chart(fig2, use_container_width=True, config={"displaylogo": False})
 
-    st.markdown("""<style>.footer{position:fixed;left:0;bottom:0;width:100%;
-        background:rgba(240,240,240,0.85);color:#333;text-align:center;
-        padding:6px 0;font-size:14px;border-top:1px solid #ccc;z-index:9999;}</style>
-        <div class="footer">C Flow - Powered by Olsen-Engineering</div>""",
-        unsafe_allow_html=True)
+        # ---------- FOOTER ----------
+    st.markdown("""
+    <style>
+    .footer {
+        position: fixed; left: 0; bottom: 0; width: 100%;
+        background-color: rgba(240,240,240,0.85); color: #333;
+        text-align: center; padding: 6px 0; font-size: 14px;
+        border-top: 1px solid #ccc; z-index: 9999;
+    }
+    </style>
+    <div class="footer"> Flow - Powered by Olsen-Engineering</div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
