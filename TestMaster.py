@@ -18,7 +18,7 @@ def connect_odoo():
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
     if not uid:
-        raise Exception("Echec authentification Odoo")
+        raise Exception("Échec authentification Odoo")
     return uid, xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
 
@@ -139,7 +139,6 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         pid = p["partner_id"][0] if p["partner_id"] else None
         p["company"] = company_map.get(pid, "N/A")
         stage_name = p["stage_id"][1] if p.get("stage_id") else ""
-        # Accepte les variantes avec/sans accent
         p["is_closed"] = "clotu" in stage_name.lower()
 
     projects.sort(key=lambda p: (
@@ -153,7 +152,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     tasks = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
         [[('project_id', 'in', project_ids), ('date_deadline', '!=', False),
           ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)'])]],
-        {'fields': ['id', 'name', 'project_id', 'date_deadline', 'state', 'stage_id']})
+        {'fields': ['id', 'name', 'project_id', 'date_deadline', 'date_start', 'state', 'stage_id']})
 
     all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
     closed_stages = set()
@@ -166,12 +165,21 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
                 closed_stages.add(s['id'])
 
     for t in tasks:
+        # date_deadline
         raw = t['date_deadline']
         if raw:
             t['date_deadline'] = datetime.strptime(raw.split(" ")[0], '%Y-%m-%d').date()
+
+        # date_start
+        raw_start = t.get('date_start')
+        if raw_start:
+            t['date_start'] = datetime.strptime(raw_start.split(" ")[0], '%Y-%m-%d').date()
+        else:
+            t['date_start'] = t['date_deadline']  # fallback si pas de début renseigné
+
         state = str(t.get('state') or '').lower()
         stage_id = t['stage_id'][0] if t.get('stage_id') else None
-        t['is_done'] = (any(kw in state for kw in ('done', 'cancel', 'terminé', 'fait'))
+        t['is_done'] = (any(kw in state for kw in ('done', 'cancel', 'termi', 'close'))
                         or stage_id in closed_stages)
     return tasks
 
@@ -262,7 +270,7 @@ def load_all_analytics(_uid, _models, project_list):
     year_end   = f"{year_now}-12-31"
     date_12m   = (date.today().replace(day=1) - timedelta(days=365)).strftime("%Y-%m-%d")
 
-    # ── 1) Lignes analytiques (depenses : classe 6 + timesheets) ──
+    # ── 1) Lignes analytiques (dépenses : classe 6 + timesheets) ──
     all_lines = models.execute_kw(DB, uid, PASSWORD, "account.analytic.line", "search_read",
         [[("account_id", "in", analytic_ids)]],
         {"fields": ["account_id", "amount", "general_account_id", "date"], "limit": 0})
@@ -286,7 +294,7 @@ def load_all_analytics(_uid, _models, project_list):
         d   = line.get("date", "")
 
         if not line.get("general_account_id"):
-            # Timesheet : montant negatif = cout
+            # Timesheet : montant négatif = coût
             if amt < 0:
                 v = -amt
                 dep_map[aid] = dep_map.get(aid, 0.0) + v
@@ -298,7 +306,7 @@ def load_all_analytics(_uid, _models, project_list):
 
         code = account_code_map.get(line["general_account_id"][0], "")
         if code.startswith("6"):
-            # Odoo BE : facture fourn = negatif → -amt positif ; NC fourn = positif → -amt negatif
+            # Odoo BE : facture fourn = négatif → -amt positif ; NC fourn = positif → -amt négatif
             v = -amt
             dep_map[aid] = dep_map.get(aid, 0.0) + v
             if year_start <= d <= year_end:
@@ -312,7 +320,7 @@ def load_all_analytics(_uid, _models, project_list):
 
     ca_all  = {}
     ca_yr   = {}
-    inv_by_aid = {}   # aid -> [invoice_ids]
+    inv_by_aid = {}
 
     all_so = models.execute_kw(DB, uid, PASSWORD, "sale.order", "search_read",
         [[("state", "in", ["sale", "done"])]],
@@ -332,7 +340,7 @@ def load_all_analytics(_uid, _models, project_list):
         for inv_id in (so.get("invoice_ids") or []):
             inv_by_aid.setdefault(aid, []).append(inv_id)
 
-    # ── 3) Facture via account.move (toutes SO, Engineering ET Standard) ──
+    # ── 3) Factures via account.move ──
     fact_all = {}
     fact_yr  = {}
     mo_rev   = []
@@ -375,7 +383,7 @@ def load_all_analytics(_uid, _models, project_list):
     else:
         df_m = pd.DataFrame(records)
         df_m["Mois"] = pd.to_datetime(df_m["date"]).dt.to_period("M").dt.to_timestamp()
-        d_agg = df_m[df_m["type"] == "dep"].groupby("Mois")["val"].sum().rename("Depenses")
+        d_agg = df_m[df_m["type"] == "dep"].groupby("Mois")["val"].sum().rename("Dépenses")
         r_agg = df_m[df_m["type"] == "rev"].groupby("Mois")["val"].sum().rename("CA")
         months = pd.date_range(start=date_12m, end=date.today().strftime("%Y-%m-%d"), freq="MS")
         df_monthly = (pd.DataFrame({"Mois": months})
@@ -383,7 +391,7 @@ def load_all_analytics(_uid, _models, project_list):
                       .merge(r_agg.reset_index(), on="Mois", how="left")
                       .fillna(0))
 
-    # ── 5) Synthese par projet ──
+    # ── 5) Synthèse par projet ──
     summary = {}
     for p in project_list:
         if not p.get("analytic_account_id"):
@@ -409,7 +417,7 @@ def load_all_analytics(_uid, _models, project_list):
             "is_closed": p.get("is_closed", False),
         }
 
-    # ── 6) Marge ponderee projets clotures : sum(benefices) / sum(CA) ──
+    # ── 6) Marge pondérée projets clôturés ──
     sum_bene = sum_ca = 0.0
     for p in project_list:
         if not p.get("is_closed"):
@@ -428,21 +436,22 @@ def load_all_analytics(_uid, _models, project_list):
 # GANTT
 # ============================================================
 
-COLOR_ORDER = ["Soudure", "Peinture", "Assemblage", "Cablage", "Test",
-               "Montage", "Mise en service", "Reception", "Transport", "Etude", "Autres"]
+COLOR_ORDER = ["Soudure", "Peinture", "Assemblage", "Câblage", "Test",
+               "Montage", "Mise en service", "Réception", "Transport", "Étude", "Autres"]
 
 COLOR_MAP = {
     "Soudure": "#1E88E5", "Peinture": "#FDD835", "Assemblage": "#43A047",
-    "Cablage": "#8E24AA", "Test": "#FB8C00", "Montage": "#E53935",
-    "Mise en service": "#EC407A", "Reception": "#6D4C41",
-    "Transport": "#00ACC1", "Etude": "#34ebc6", "Autres": "#9E9E9E"
+    "Câblage": "#8E24AA", "Test": "#FB8C00", "Montage": "#E53935",
+    "Mise en service": "#EC407A", "Réception": "#6D4C41",
+    "Transport": "#00ACC1", "Étude": "#34ebc6", "Autres": "#9E9E9E"
 }
 
-COLOR_DISPLAY = {
-    "Soudure": "Soudure", "Peinture": "Peinture", "Assemblage": "Assemblage",
-    "Cablage": "Cablage", "Test": "Test", "Montage": "Montage",
-    "Mise en service": "Mise en service", "Reception": "Reception",
-    "Transport": "Transport", "Etude": "Etude", "Autres": "Autres"
+# Couleurs assombries (opacity ~60%) pour les tâches terminées
+COLOR_MAP_DONE = {
+    "Soudure": "#0d3a6e", "Peinture": "#8a7a00", "Assemblage": "#1a4a1e",
+    "Câblage": "#3d0a5a", "Test": "#7a4400", "Montage": "#6b0f0f",
+    "Mise en service": "#7a1040", "Réception": "#2e1f18",
+    "Transport": "#004a52", "Étude": "#0f5a4e", "Autres": "#3a3a3a"
 }
 
 
@@ -451,13 +460,13 @@ def classify_task_type(name):
     if "soud" in n: return "Soudure"
     if "peint" in n: return "Peinture"
     if "assembl" in n: return "Assemblage"
-    if "cabl" in n: return "Cablage"
+    if "cabl" in n or "câbl" in n: return "Câblage"
     if "test" in n: return "Test"
     if "montage" in n or "installation" in n: return "Montage"
     if "mise en service" in n or " mes" in n: return "Mise en service"
-    if "recept" in n or "assistance" in n: return "Reception"
+    if "recept" in n or "réception" in n or "assistance" in n: return "Réception"
     if "transport" in n: return "Transport"
-    if "etude" in n or "conception" in n or "plan" in n or "calcul" in n: return "Etude"
+    if "etude" in n or "étude" in n or "conception" in n or "plan" in n or "calcul" in n: return "Étude"
     return "Autres"
 
 
@@ -513,11 +522,11 @@ def main():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # Banniere
+    # Bannière
     c1, c2, c3 = st.columns([1, 4, 1])
     with c1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
-        st.markdown("<div style='color:green;font-weight:bold;margin-top:20px;'>Connecte Odoo</div>",
+        st.markdown("<div style='color:green;font-weight:bold;margin-top:20px;'>Connecté Odoo</div>",
                     unsafe_allow_html=True)
     with c2:
         st.markdown("<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
@@ -552,57 +561,65 @@ def main():
         end_view   = today + timedelta(days=30 * months)
 
         gantt_data = []
-        overlap_counter = {}
         for t in tasks:
             proj = next((p for p in projects if p['id'] == t['project_id'][0]), None)
             if not proj:
                 continue
             label    = project_label(proj)
-            deadline = t["date_deadline"]
-            wk       = (label, deadline.isocalendar()[1], deadline.year)
-            cnt      = overlap_counter.get(wk, 0)
-            overlap_counter[wk] = cnt + 1
+            task_type = classify_task_type(t["name"])
+            # Couleur selon l'état terminé ou non
+            color = COLOR_MAP_DONE[task_type] if t.get("is_done") else COLOR_MAP[task_type]
             gantt_data.append({
-                "Tache":   t["name"],
-                "Projet":  label,
-                "Debut":   deadline  + timedelta(days=cnt),
-                "Fin":     deadline  + timedelta(days=cnt),
-                "Type":    classify_task_type(t["name"]),
-                "is_done": t.get("is_done", False),
-                "deadline_str": str(deadline),
+                "Tâche":        t["name"],
+                "Projet":       label,
+                "Début":        t["date_start"],
+                "Fin":          t["date_deadline"],
+                "Type":         task_type,
+                "is_done":      t.get("is_done", False),
+                "deadline_str": str(t["date_deadline"]),
+                "color":        color,
             })
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
-            df_gantt["code"]   = df_gantt["Projet"].apply(extract_project_code)
-            df_gantt           = df_gantt.sort_values("code")
-            df_gantt["TypeCat"] = pd.Categorical(df_gantt["Type"], categories=COLOR_ORDER, ordered=True)
+            df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
+            df_gantt = df_gantt.sort_values("code")
 
-            # Gantt de base avec les couleurs normales (legende integre)
-            fig = px.timeline(df_gantt, x_start="Debut", x_end="Fin", y="Projet",
-                              color="TypeCat", color_discrete_map=COLOR_MAP,
-                              hover_name="Tache",
-                              hover_data={"Debut": True, "Fin": True, "TypeCat": True, "Projet": False})
+            # On construit le Gantt avec px.timeline en colorant par "Type"
+            # mais on sépare les tâches terminées (couleur assombrie) des actives
+            # pour ne pas polluer la légende.
+            # Stratégie : on utilise color_discrete_map sur la colonne "Type"
+            # pour les tâches actives, et on ajoute les tâches terminées
+            # manuellement via go.Bar avec leur couleur assombrie, sans showlegend.
 
-            # Renommer les traces pour la legende
-            for trace in fig.data:
-                trace.name = COLOR_DISPLAY.get(trace.name, trace.name)
+            df_active = df_gantt[~df_gantt["is_done"]].copy()
+            df_done   = df_gantt[df_gantt["is_done"]].copy()
 
-            # Masque semi-transparent noir sur les taches terminees
-            # → la couleur d'origine reste visible, la legende n'est pas touchee
-            df_done = df_gantt[df_gantt["is_done"]].copy()
-            if not df_done.empty:
+            # Gantt des tâches actives avec légende propre
+            fig = px.timeline(
+                df_active,
+                x_start="Début", x_end="Fin", y="Projet",
+                color="Type",
+                color_discrete_map=COLOR_MAP,
+                hover_name="Tâche",
+                hover_data={"Début": True, "Fin": True, "Type": True, "Projet": False},
+            )
+
+            # Tâches terminées : ajout manuel avec couleur assombrie, sans entrée légende
+            for _, row in df_done.iterrows():
+                delta = max((row["Fin"] - row["Début"]).days, 0)
                 fig.add_trace(go.Bar(
-                    name="Termine",
-                    x=[(row["Fin"] - row["Debut"]).days for _, row in df_done.iterrows()],
-                    y=df_done["Projet"],
-                    base=[str(row["Debut"]) for _, row in df_done.iterrows()],
+                    name=row["Type"],      # même nom de type mais…
+                    x=[delta],
+                    y=[row["Projet"]],
+                    base=[str(row["Début"])],
                     orientation="h",
-                    marker=dict(color="rgba(0,0,0,0.50)", line=dict(width=0)),
-                    width=0.85,
-                    text=df_done["Tache"],
-                    hovertemplate="<b>%{text}</b> (Termine)<extra></extra>",
-                    showlegend=True,
+                    marker=dict(color=row["color"], line=dict(width=0)),
+                    width=0.6,
+                    text=row["Tâche"],
+                    hovertemplate=f"<b>{row['Tâche']}</b> (Terminé)<br>"
+                                  f"Début : {row['Début']}<br>Fin : {row['Fin']}<extra></extra>",
+                    showlegend=False,      # ← pas dans la légende
                 ))
 
             n_proj = len(df_gantt["Projet"].unique())
@@ -624,7 +641,7 @@ def main():
             # Ligne aujourd'hui
             fig.add_vline(x=today, line_width=2, line_color="white", opacity=0.9)
 
-            # Separateurs mois
+            # Séparateurs mois
             cur = date(today.year, today.month, 1)
             while True:
                 cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
@@ -632,7 +649,7 @@ def main():
                     break
                 fig.add_vline(x=cur, line_width=1, line_dash="dot", line_color="rgba(200,200,200,0.35)")
 
-            # Separateurs week-end
+            # Séparateurs week-end
             cur_day = today - timedelta(days=today.weekday())
             while cur_day <= end_view:
                 sat = cur_day + timedelta(days=5)
@@ -646,7 +663,7 @@ def main():
 
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
-            st.info("Aucune tache a afficher dans le Gantt.")
+            st.info("Aucune tâche à afficher dans le Gantt.")
 
         c_sl, c_nb = st.columns([3, 1])
         with c_sl:
@@ -658,7 +675,7 @@ def main():
             st.session_state["months"] = new_months
             st.rerun()
 
-        st.subheader("Taches du projet")
+        st.subheader("Tâches du projet")
         proj_map = {project_label(p): p["id"] for p in projects}
         sel = st.selectbox("Projet", ["Aucun"] + list(proj_map.keys()), index=0)
         if sel != "Aucun":
@@ -672,9 +689,9 @@ def main():
                     done    = " (Terminé)" if t.get("is_done") else ""
                     st.write(f"- **{t['name']}**{done}{we_flag} — {t['date_deadline'].strftime('%d-%m-%Y')}")
             else:
-                st.info("Aucune tache pour ce projet.")
+                st.info("Aucune tâche pour ce projet.")
         else:
-            st.info("Selectionne un projet.")
+            st.info("Sélectionne un projet.")
 
     # ── ONGLET 2 : PURCHASES ─────────────────────────────────────
     with tab2:
@@ -709,10 +726,10 @@ def main():
                         unsafe_allow_html=True)
 
         st.markdown("---")
-        st.subheader("Detail lignes d'achat")
+        st.subheader("Détail lignes d'achat")
         sel_id = st.session_state.get("selected_purchase_project_id")
         if sel_id is None:
-            st.info("Clique sur une vignette pour voir le detail.")
+            st.info("Clique sur une vignette pour voir le détail.")
         else:
             p = next((p for p in projects_all if p['id'] == sel_id), None)
             if p:
@@ -734,7 +751,7 @@ def main():
                             <div><b>Buyer:</b> {row['Buyer']}</div>
                             <div><b>Desc:</b> {row['Description']}</div>
                             <div><b>Ord.:</b> {row['Ordered']}</div>
-                            <div><b>Recu:</b> {row['Received']}</div>
+                            <div><b>Reçu:</b> {row['Received']}</div>
                             <div><b>Date:</b> {dd}</div>
                         </div>""", unsafe_allow_html=True)
 
@@ -753,7 +770,7 @@ def main():
             analytics, df_monthly, marge_pond = load_all_analytics(uid, models, projects_ana)
 
         if not analytics:
-            st.info("Aucune donnee disponible.")
+            st.info("Aucune donnée disponible.")
             return
 
         actifs = [p for p in projects_ana
@@ -766,14 +783,14 @@ def main():
         s_fac = sum(analytics[p["id"]]["a_facturer_annee"] for p in actifs)
 
         st.markdown(f"<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
-                    f"Statistiques génrales", unsafe_allow_html=True)
+                    f"Statistiques générales</div>", unsafe_allow_html=True)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"Sales {year_now}", fmt_eur(s_ca))
         m2.metric(f"Achats+Timesheets {year_now}", fmt_eur(s_dep))
-        m3.metric("Marge restimée (cloturés)", f"{marge_pond:.1f} %",
-                  help="Somme bénéfices / Somme CA, projets clotures")
-        m4.metric("A facturer (annee)", fmt_eur(s_fac))
+        m3.metric("Marge restimée (clôturés)", f"{marge_pond:.1f} %",
+                  help="Somme bénéfices / Somme CA, projets clôturés")
+        m4.metric("À facturer (année)", fmt_eur(s_fac))
 
         st.markdown("---")
         st.markdown("#### Détail par projet")
@@ -788,15 +805,15 @@ def main():
                 "Projet":     short_desc(clean_description_from_display_name(p["display_name"]), 45),
                 "Client":     p["company"],
                 "CA":         a["ca_total"],
-                "Depenses":   a["depenses_all"],
-                "Facture":    a["facture_all"],
+                "Dépenses":   a["depenses_all"],
+                "Facturé":    a["facture_all"],
                 "A_fac":      a["a_facturer"],
                 "Marge_EUR":  a["marge_c"],
                 "Marge_PCT":  a["marge_pct"],
             })
 
         if not rows:
-            st.info("Aucune donnee.")
+            st.info("Aucune donnée.")
         else:
             df_ana = pd.DataFrame(rows)
             search = st.text_input("Recherche", "", placeholder="Projet ou client...", key="ana_search")
@@ -811,9 +828,9 @@ def main():
                 border-bottom:2px solid #555;position:sticky;top:0;background:#0e1117;z-index:10;">
                 <div>Projet</div><div>Client</div>
                 <div style="text-align:right;">CA Total</div>
-                <div style="text-align:right;">Depenses</div>
-                <div style="text-align:right;">Facture</div>
-                <div style="text-align:right;">A facturer</div>
+                <div style="text-align:right;">Dépenses</div>
+                <div style="text-align:right;">Facturé</div>
+                <div style="text-align:right;">À facturer</div>
                 <div style="text-align:right;">Marge EUR</div>
                 <div style="text-align:right;">Marge %</div>
             </div>"""
@@ -826,7 +843,7 @@ def main():
                 mc   = "#e53935" if row["Marge_EUR"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
                 afc  = "#e53935" if row["A_fac"] < 0 else "#00ACC1"
                 bdg  = (" <span style='font-size:9px;background:#1565C0;color:white;"
-                        "padding:1px 4px;border-radius:3px;'>Cloture</span>" if cl else "")
+                        "padding:1px 4px;border-radius:3px;'>Clôturé</span>" if cl else "")
 
                 def fe(v): return f"{v:,.0f}".replace(",", " ") + " EUR"
                 def fp(v): return f"{v:.1f} %"
@@ -839,8 +856,8 @@ def main():
                     <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;">
                         {row['Client']}</div>
                     <div style="text-align:right;">{fe(row['CA'])}</div>
-                    <div style="text-align:right;">{fe(row['Depenses'])}</div>
-                    <div style="text-align:right;">{fe(row['Facture'])}</div>
+                    <div style="text-align:right;">{fe(row['Dépenses'])}</div>
+                    <div style="text-align:right;">{fe(row['Facturé'])}</div>
                     <div style="text-align:right;color:{afc};font-weight:600;">{fe(row['A_fac'])}</div>
                     <div style="text-align:right;color:{mc};font-weight:600;">{fe(row['Marge_EUR'])}</div>
                     <div style="text-align:right;color:{mc};">{fp(row['Marge_PCT'])}</div>
@@ -851,21 +868,21 @@ def main():
                 {hdr}<div>{body}</div></div>""", unsafe_allow_html=True)
 
             st.markdown("---")
-            st.markdown("#### Evolution CA facture & Depenses — 12 derniers mois")
+            st.markdown("#### Évolution CA facturé & Dépenses — 12 derniers mois")
 
             if df_monthly.empty:
                 st.info("Pas de données mensuelles.")
             else:
                 dm = df_monthly.copy()
                 dm["Mois_label"] = pd.to_datetime(dm["Mois"]).dt.strftime("%b %Y")
-                dep_col = "Depenses" if "Depenses" in dm.columns else "Depenses"
+                dep_col = "Dépenses" if "Dépenses" in dm.columns else "Depenses"
 
                 df_p = pd.concat([
-                    dm[["Mois_label", "CA"]].rename(columns={"CA": "M"}).assign(S="CA facture"),
-                    dm[["Mois_label", dep_col]].rename(columns={dep_col: "M"}).assign(S="Depenses"),
+                    dm[["Mois_label", "CA"]].rename(columns={"CA": "M"}).assign(S="CA facturé"),
+                    dm[["Mois_label", dep_col]].rename(columns={dep_col: "M"}).assign(S="Dépenses"),
                 ])
                 fig2 = px.bar(df_p, x="Mois_label", y="M", color="S", barmode="group",
-                              color_discrete_map={"CA facture": "#43a047", "Depenses": "#e53935"},
+                              color_discrete_map={"CA facturé": "#43a047", "Dépenses": "#e53935"},
                               height=380, labels={"Mois_label": "", "M": "EUR"})
                 fig2.update_layout(margin=dict(l=10, r=10, t=20, b=20),
                                    plot_bgcolor="rgba(0,0,0,0)",
@@ -876,7 +893,7 @@ def main():
                                    bargap=0.2, bargroupgap=0.05)
                 st.plotly_chart(fig2, use_container_width=True, config={"displaylogo": False})
 
-        # ---------- FOOTER ----------
+    # ── FOOTER ──
     st.markdown("""
     <style>
     .footer {
@@ -886,7 +903,7 @@ def main():
         border-top: 1px solid #ccc; z-index: 9999;
     }
     </style>
-    <div class="footer"> Flow - Powered by Olsen-Engineering</div>
+    <div class="footer">Flow - Powered by Olsen-Engineering</div>
     """, unsafe_allow_html=True)
 
 
