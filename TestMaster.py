@@ -123,7 +123,7 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
 
-    base = [('stage_id.name', 'not in', ['Template', 'Annule', 'Annule'])]
+    base = [('stage_id.name', 'not in', ['Template', 'Annulé', 'Annule'])]
     if filter_mode == "engineering":
         domain = base + [('tag_ids', 'in', eng), ('tag_ids', 'in', prol)]
     elif filter_mode == "standard":
@@ -171,7 +171,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
             t['date_deadline'] = datetime.strptime(raw.split(" ")[0], '%Y-%m-%d').date()
         state = str(t.get('state') or '').lower()
         stage_id = t['stage_id'][0] if t.get('stage_id') else None
-        t['is_done'] = (any(kw in state for kw in ('done', 'cancel', 'annul', 'clos'))
+        t['is_done'] = (any(kw in state for kw in ('done', 'cancel', 'terminé', 'fait'))
                         or stage_id in closed_stages)
     return tasks
 
@@ -565,8 +565,8 @@ def main():
             gantt_data.append({
                 "Tache":   t["name"],
                 "Projet":  label,
-                "Debut":   deadline - timedelta(days=3) + timedelta(days=cnt),
-                "Fin":     deadline + timedelta(days=3) + timedelta(days=cnt),
+                "Debut":   deadline  + timedelta(days=cnt),
+                "Fin":     deadline  + timedelta(days=cnt),
                 "Type":    classify_task_type(t["name"]),
                 "is_done": t.get("is_done", False),
                 "deadline_str": str(deadline),
