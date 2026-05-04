@@ -165,9 +165,14 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     if start_field:
         fields_to_fetch.append(start_field)
 
-    tasks = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
-        [[('project_id', 'in', project_ids), ('date_deadline', '!=', False),
-        {'fields': fields_to_fetch})
+    tasks = models.execute_kw(
+    DB, uid, PASSWORD, 'project.task', 'search_read',
+    [[
+        ('project_id', 'in', project_ids),
+        ('date_deadline', '!=', False)
+    ]],
+    {'fields': fields_to_fetch}
+)
 
     all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
     closed_stages = set()
