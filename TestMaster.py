@@ -152,7 +152,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     # Détection du champ date de début selon la version Odoo
     # On essaie planned_date_begin (Odoo 16/17) puis date_start (14/15)
     start_field = None
-    for candidate in ('planned_date_start', 'date_start'):
+    for candidate in ('planned_date_start', 'planned_date_begin'):
         try:
             models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
                 [[('id', '=', 0)]], {'fields': [candidate], 'limit': 1})
