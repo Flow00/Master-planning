@@ -149,10 +149,26 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 
 
 def get_tasks(uid, models, project_ids, start_date, end_date):
+    # Odoo 16/17 : le champ de début de tâche s'appelle 'planned_date_begin'
+    # Odoo 14/15 : il s'appelle 'date_start'
+    # On détecte lequel existe via fields_get
+    task_fields_info = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'fields_get',
+        [], {'attributes': ['string']})
+    if 'planned_date_begin' in task_fields_info:
+        start_field = 'planned_date_begin'
+    elif 'date_start' in task_fields_info:
+        start_field = 'date_start'
+    else:
+        start_field = None
+
+    fields_to_fetch = ['id', 'name', 'project_id', 'date_deadline', 'state', 'stage_id']
+    if start_field:
+        fields_to_fetch.append(start_field)
+
     tasks = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
         [[('project_id', 'in', project_ids), ('date_deadline', '!=', False),
           ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)'])]],
-        {'fields': ['id', 'name', 'project_id', 'date_deadline', 'date_start', 'state', 'stage_id']})
+        {'fields': fields_to_fetch})
 
     all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
     closed_stages = set()
@@ -170,8 +186,8 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
         if raw:
             t['date_deadline'] = datetime.strptime(raw.split(" ")[0], '%Y-%m-%d').date()
 
-        # date_start
-        raw_start = t.get('date_start')
+        # date_start : normalisé sous la clé 'date_start' quelle que soit la version Odoo
+        raw_start = t.get(start_field) if start_field else None
         if raw_start:
             t['date_start'] = datetime.strptime(raw_start.split(" ")[0], '%Y-%m-%d').date()
         else:
