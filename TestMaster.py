@@ -187,10 +187,14 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
         # date_start : normalisé sous la clé 'date_start' quelle que soit la version Odoo
         raw_start = t.get(start_field) if start_field else None
-        if raw_start:
-            t['date_start'] = datetime.strptime(raw_start.split(" ")[0], '%Y-%m-%d').date()
-        else:
-            t['date_start'] = t['date_deadline']  # fallback si pas de début renseigné
+        try:
+            if raw_start:
+                parsed = datetime.strptime(raw_start.split(" ")[0], '%Y-%m-%d').date()
+                t['date_start'] = min(parsed, t['date_deadline'])  # date_start jamais après deadline
+            else:
+                t['date_start'] = t['date_deadline']
+        except Exception:
+            t['date_start'] = t['date_deadline']
 
                 # AJOUTER CES LIGNES après :
         if t['date_start'] > t['date_deadline']:
@@ -611,6 +615,10 @@ def main():
 
             # color_discrete_map complet : couleurs normales + assombries
             full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
+
+            # Juste avant px.timeline :
+            df_gantt["Début"] = pd.to_datetime(df_gantt["Début"])
+            df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
 
             fig = px.timeline(
                 df_gantt,
