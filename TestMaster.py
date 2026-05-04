@@ -149,17 +149,17 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 
 
 def get_tasks(uid, models, project_ids, start_date, end_date):
-    # Odoo 16/17 : le champ de début de tâche s'appelle 'planned_date_begin'
-    # Odoo 14/15 : il s'appelle 'date_start'
-    # On détecte lequel existe via fields_get
-    task_fields_info = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'fields_get',
-        [], {'attributes': ['string']})
-    if 'planned_date_begin' in task_fields_info:
-        start_field = 'planned_date_begin'
-    elif 'date_start' in task_fields_info:
-        start_field = 'date_start'
-    else:
-        start_field = None
+    # Détection du champ date de début selon la version Odoo
+    # On essaie planned_date_begin (Odoo 16/17) puis date_start (14/15)
+    start_field = None
+    for candidate in ('planned_date_start', 'planned_date_begin', 'date_start'):
+        try:
+            models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
+                [[('id', '=', 0)]], {'fields': [candidate], 'limit': 1})
+            start_field = candidate
+            break
+        except Exception:
+            pass
 
     fields_to_fetch = ['id', 'name', 'project_id', 'date_deadline', 'state', 'stage_id']
     if start_field:
@@ -601,42 +601,31 @@ def main():
             df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
             df_gantt = df_gantt.sort_values("code")
 
-            # On construit le Gantt avec px.timeline en colorant par "Type"
-            # mais on sépare les tâches terminées (couleur assombrie) des actives
-            # pour ne pas polluer la légende.
-            # Stratégie : on utilise color_discrete_map sur la colonne "Type"
-            # pour les tâches actives, et on ajoute les tâches terminées
-            # manuellement via go.Bar avec leur couleur assombrie, sans showlegend.
+            # color_key = "Type" pour les tâches actives, "Type__done" pour les terminées
+            # Ainsi px.timeline crée des traces séparées, on masque __done de la légende après.
+            df_gantt["color_key"] = df_gantt.apply(
+                lambda r: r["Type"] + "__done" if r["is_done"] else r["Type"], axis=1)
 
-            df_active = df_gantt[~df_gantt["is_done"]].copy()
-            df_done   = df_gantt[df_gantt["is_done"]].copy()
+            # color_discrete_map complet : couleurs normales + assombries
+            full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
 
-            # Gantt des tâches actives avec légende propre
             fig = px.timeline(
-                df_active,
+                df_gantt,
                 x_start="Début", x_end="Fin", y="Projet",
-                color="Type",
-                color_discrete_map=COLOR_MAP,
+                color="color_key",
+                color_discrete_map=full_color_map,
                 hover_name="Tâche",
-                hover_data={"Début": True, "Fin": True, "Type": True, "Projet": False},
+                hover_data={"Début": True, "Fin": True, "Type": True, "Projet": False,
+                            "color_key": False, "is_done": False},
             )
 
-            # Tâches terminées : ajout manuel avec couleur assombrie, sans entrée légende
-            for _, row in df_done.iterrows():
-                delta = max((row["Fin"] - row["Début"]).days, 0)
-                fig.add_trace(go.Bar(
-                    name=row["Type"],      # même nom de type mais…
-                    x=[delta],
-                    y=[row["Projet"]],
-                    base=[str(row["Début"])],
-                    orientation="h",
-                    marker=dict(color=row["color"], line=dict(width=0)),
-                    width=0.6,
-                    text=row["Tâche"],
-                    hovertemplate=f"<b>{row['Tâche']}</b> (Terminé)<br>"
-                                  f"Début : {row['Début']}<br>Fin : {row['Fin']}<extra></extra>",
-                    showlegend=False,      # ← pas dans la légende
-                ))
+            # Renommer les traces normales (retirer le suffixe __done inexistant)
+            # et masquer les traces __done de la légende
+            for trace in fig.data:
+                if trace.name.endswith("__done"):
+                    trace.showlegend = False
+                else:
+                    trace.name = trace.name  # déjà propre
 
             n_proj = len(df_gantt["Projet"].unique())
             fig.update_layout(
