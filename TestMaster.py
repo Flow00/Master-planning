@@ -152,7 +152,7 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
     # Détection du champ date de début selon la version Odoo
     # On essaie planned_date_begin (Odoo 16/17) puis date_start (14/15)
     start_field = None
-    for candidate in ('planned_date_start', 'planned_date_begin', 'date_start'):
+    for candidate in ('planned_date_start', 'date_start'):
         try:
             models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
                 [[('id', '=', 0)]], {'fields': [candidate], 'limit': 1})
@@ -603,7 +603,7 @@ def main():
 
             # color_key = "Type" pour les tâches actives, "Type__done" pour les terminées
             # Ainsi px.timeline crée des traces séparées, on masque __done de la légende après.
-            df_gantt["color_key"] = df_gantt.apply(
+            df_gantt["Légende"] = df_gantt.apply(
                 lambda r: r["Type"] + "__done" if r["is_done"] else r["Type"], axis=1)
 
             # color_discrete_map complet : couleurs normales + assombries
@@ -612,11 +612,11 @@ def main():
             fig = px.timeline(
                 df_gantt,
                 x_start="Début", x_end="Fin", y="Projet",
-                color="color_key",
+                color="Légende",
                 color_discrete_map=full_color_map,
                 hover_name="Tâche",
                 hover_data={"Début": True, "Fin": True, "Type": True, "Projet": False,
-                            "color_key": False, "is_done": False},
+                            "Légende": False, "is_done": False},
             )
 
             # Renommer les traces normales (retirer le suffixe __done inexistant)
@@ -624,8 +624,7 @@ def main():
             for trace in fig.data:
                 if trace.name.endswith("__done"):
                     trace.showlegend = False
-                else:
-                    trace.name = trace.name  # déjà propre
+                    trace.name = trace.name.replace("__done", "")
 
             n_proj = len(df_gantt["Projet"].unique())
             fig.update_layout(
