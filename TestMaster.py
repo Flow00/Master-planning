@@ -597,11 +597,18 @@ def main():
             task_type = classify_task_type(t["name"])
             # Couleur selon l'état terminé ou non
             color = COLOR_MAP_DONE[task_type] if t.get("is_done") else COLOR_MAP[task_type]
+            
+            # AFTER — guarantee minimum 1-day width:
+            start_dt = t["date_start"]
+            end_dt   = t["date_deadline"]
+            if start_dt >= end_dt:          # same-day or bad data → force 1-day bar
+                end_dt = start_dt + timedelta(days=1)
+            
             gantt_data.append({
                 "Tâche":        t["name"],
                 "Projet":       label,
-                "Début":        t["date_start"],
-                "Fin":          t["date_deadline"],
+                "Début":        start_dt,
+                "Fin":          end_dt,       # ← use end_dt, not t["date_deadline"]
                 "Type":         task_type,
                 "is_done":      t.get("is_done", False),
                 "deadline_str": str(t["date_deadline"]),
@@ -624,6 +631,13 @@ def main():
             # Juste avant px.timeline :
             df_gantt["Début"] = pd.to_datetime(df_gantt["Début"])
             df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
+
+            df_gantt["Début"] = pd.to_datetime(df_gantt["Début"])
+            df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
+            
+            # Safety net: any row where Fin <= Début gets +1 day
+            mask = df_gantt["Fin"] <= df_gantt["Début"]
+            df_gantt.loc[mask, "Fin"] = df_gantt.loc[mask, "Début"] + pd.Timedelta(days=1)
 
             fig = px.timeline(
                 df_gantt,
