@@ -167,7 +167,6 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
 
     tasks = models.execute_kw(DB, uid, PASSWORD, 'project.task', 'search_read',
         [[('project_id', 'in', project_ids), ('date_deadline', '!=', False),
-          ('tag_ids.name', 'in', ['Engineering', 'PRO (LIG)', 'PRO(LIG)'])]],
         {'fields': fields_to_fetch})
 
     all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
@@ -192,6 +191,10 @@ def get_tasks(uid, models, project_ids, start_date, end_date):
             t['date_start'] = datetime.strptime(raw_start.split(" ")[0], '%Y-%m-%d').date()
         else:
             t['date_start'] = t['date_deadline']  # fallback si pas de début renseigné
+
+                # AJOUTER CES LIGNES après :
+        if t['date_start'] > t['date_deadline']:
+            t['date_start'] = t['date_deadline']
 
         state = str(t.get('state') or '').lower()
         stage_id = t['stage_id'][0] if t.get('stage_id') else None
