@@ -105,12 +105,13 @@ def load_projects(_uid, _models, filter_mode="both"):
         domain = base + ['|', ('tag_ids', 'in', eng), ('tag_ids', 'in', std), ('tag_ids', 'in', prol)]
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
-        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id']})
+        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id']})
 
     company_map = get_top_companies_batch(uid, models, [p["partner_id"] for p in projects])
     for p in projects:
         pid = p["partner_id"][0] if p["partner_id"] else None
         p["company"] = company_map.get(pid, "N/A")
+        p["stage"]   = p["stage_id"][1] if p.get("stage_id") else "—"
 
     ids = [p["id"] for p in projects]
     updates = models.execute_kw(DB, uid, PASSWORD, 'project.update', 'search_read',
@@ -539,7 +540,7 @@ def map_tasks_to_grid(projects, tasks, weeks):
 # ============================================================
 
 def main():
-    st.set_page_config(page_title="Master Planning Odoo", layout="wide")
+    st.set_page_config(page_title="Dashboard", page_icon="🏗️", layout="wide")
     st.markdown("""<style>
     .block-container{padding-top:0.5rem!important;}
     div[data-testid="stToggle"]>label{font-size:13px!important;}
@@ -625,8 +626,19 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
-            df_gantt["code"] = df_gantt["Projet"].apply(extract_project_code)
-            df_gantt = df_gantt.sort_values("code")
+            # Toggle: tri par code projet (défaut) ou par étape Odoo
+            _tc1, _tc2 = st.columns([4, 1])
+            with _tc2:
+                _sort_by_stage = st.toggle("Par étape", value=False, key="gantt_sort_stage")
+            _stage_map = {project_label(p): p.get("stage", "—") for p in projects}
+            df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
+            df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
+            if _sort_by_stage:
+                df_gantt = df_gantt.sort_values(["stage", "code"])
+                df_gantt["Projet_display"] = df_gantt["stage"] + "  ·  " + df_gantt["Projet"]
+            else:
+                df_gantt = df_gantt.sort_values("code")
+                df_gantt["Projet_display"] = df_gantt["Projet"]
 
             # color_key = "Type" pour les tâches actives, "Type__done" pour les terminées
             # Ainsi px.timeline crée des traces séparées, on masque __done de la légende après.
@@ -649,11 +661,11 @@ def main():
 
             fig = px.timeline(
                 df_gantt,
-                x_start="Début", x_end="Fin", y="Projet",
+                x_start="Début", x_end="Fin", y="Projet_display",
                 color="Légende",
                 color_discrete_map=full_color_map,
                 hover_name="Tâche",
-                hover_data={"Début": True, "Fin": True, "Type": True, "Projet": False,
+                hover_data={"Début": True, "Fin": True, "Type": True, "Projet_display": False,
                             "Légende": False, "is_done": False},
             )
 
@@ -664,14 +676,16 @@ def main():
                     trace.showlegend = False
                     trace.name = trace.name.replace("__done", "")
 
-            n_proj = len(df_gantt["Projet"].unique())
+            n_proj = len(df_gantt["Projet_display"].unique())
             fig.update_layout(
                 barmode="overlay",
                 dragmode="pan",
                 height=max(500, n_proj * 18 + 140),
                 bargap=0.3, bargroupgap=0.1,
                 margin=dict(l=20, r=20, t=40, b=20),
-                yaxis=dict(autorange="reversed", tickfont=dict(size=12),
+                yaxis=dict(categoryorder="array",
+                           categoryarray=list(reversed(df_gantt["Projet_display"].unique().tolist())),
+                           tickfont=dict(size=12),
                            showgrid=True, gridcolor="rgba(180,180,180,0.18)"),
                 xaxis=dict(showgrid=False),
                 plot_bgcolor="rgba(0,0,0,0)",
