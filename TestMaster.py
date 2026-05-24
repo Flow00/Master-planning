@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # ---------- CONFIG ODOO ----------
 from cryptography.fernet import Fernet as _F
-_f = _F(_get_key())   # _get_key() defined at the bottom of this file
+_f = _F(_get_key())   
  
 _ODOO_URL = b"gAAAAABqE2o7n0-46Mrq_zGgEImejUrqFcUfa2KK6mOb6DziDNKwkdMAc4elmHcK5QIRBKW1Fv7nZADDeyOoW1ZwC6bwIqwTwHtsBF9m1p6m8K92k3pG0aWYOHRLUh7xd01QS5dr4ruf"
 _DB       = b"gAAAAABqE2o7uI4dQh6jpjUu3vJxnAT69g8bnDPyExgVcoLFHkPQ9Gu6awqPiGpIBJcnyMTawHeLp9u3LUIxgiZ-2eQPjk3d_37HueqIKz6kd-muNKHQpMA="
