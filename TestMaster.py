@@ -482,6 +482,20 @@ def load_all_analytics(_uid, _models, project_list):
 # GANTT
 # ============================================================
 
+# Ordre voulu pour le tri "Par étape" du Gantt.
+# Les libellés Odoo sont normalisés en minuscules avant comparaison,
+# donc l'ordre est insensible à la casse et aux accents partiels.
+STAGE_ORDER = ["kickoff", "technique étude", "appro", "atelier", "montage", "reception et ce"]
+
+def _stage_rank(stage_name):
+    """Renvoie le rang de l'étape selon STAGE_ORDER ; inconnues placées à la fin."""
+    s = (stage_name or "").lower().strip()
+    for i, label in enumerate(STAGE_ORDER):
+        if label in s or s in label:
+            return i
+    return len(STAGE_ORDER)
+
+
 COLOR_ORDER = ["Soudure", "Peinture", "Assemblage", "Câblage", "Test",
                "Montage", "Mise en service", "Réception", "Transport", "Étude", "Autres"]
 
@@ -643,8 +657,9 @@ def main():
             df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
             if _sort_by_stage:
-                df_gantt = df_gantt.sort_values(["stage", "code"])
-                df_gantt["Projet_display"] = df_gantt["stage"] + "  ·  " + df_gantt["Projet"]
+                df_gantt["stage_rank"] = df_gantt["stage"].apply(_stage_rank)
+                df_gantt = df_gantt.sort_values(["stage_rank", "code"])
+                df_gantt["Projet_display"] = df_gantt["Projet"]
             else:
                 df_gantt = df_gantt.sort_values("code")
                 df_gantt["Projet_display"] = df_gantt["Projet"]
