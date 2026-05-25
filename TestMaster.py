@@ -662,6 +662,16 @@ def main():
                 df_gantt["stage_rank"] = df_gantt["stage"].apply(lambda s: -_stage_rank(s))
                 df_gantt = df_gantt.sort_values(["stage_rank", "code"])
                 df_gantt["Projet_display"] = df_gantt["Projet"]
+
+                # --- DEBUG TEMPORAIRE : étapes lues dans Odoo + rang calculé ---
+                # À supprimer une fois l'ordre validé.
+                _dbg = (df_gantt[["stage"]].drop_duplicates()
+                        .assign(rang_brut=lambda d: d["stage"].apply(_stage_rank))
+                        .sort_values("rang_brut"))
+                with st.expander("DEBUG étapes (à retirer ensuite)"):
+                    st.write("STAGE_ORDER attendu :", STAGE_ORDER)
+                    st.dataframe(_dbg, use_container_width=True)
+                # --- FIN DEBUG ---
             else:
                 df_gantt = df_gantt.sort_values("code")
                 df_gantt["Projet_display"] = df_gantt["Projet"]
