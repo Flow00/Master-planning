@@ -9,20 +9,29 @@ from streamlit_autorefresh import st_autorefresh
 
 # ---------- CONFIG ODOO ----------
 from cryptography.fernet import Fernet as _F
-_f = _F(_get_key())   
- 
+
 _ODOO_URL = b"gAAAAABqE2o7n0-46Mrq_zGgEImejUrqFcUfa2KK6mOb6DziDNKwkdMAc4elmHcK5QIRBKW1Fv7nZADDeyOoW1ZwC6bwIqwTwHtsBF9m1p6m8K92k3pG0aWYOHRLUh7xd01QS5dr4ruf"
 _DB       = b"gAAAAABqE2o7uI4dQh6jpjUu3vJxnAT69g8bnDPyExgVcoLFHkPQ9Gu6awqPiGpIBJcnyMTawHeLp9u3LUIxgiZ-2eQPjk3d_37HueqIKz6kd-muNKHQpMA="
 _USERNAME = b"gAAAAABqE2o7kHXd143Tp1dLyfoJeyfL9x9ec2WhX_7-SQSDnmXo7r0sLJtJ_g8aBhdt60SmpsX1VoJIk-GqMQYfvjwKTrSJkgmy0ith4q0FJAAB8auYSfs="
 _PASSWORD = b"gAAAAABqE2o7E-OjKOiLbiaT5ao7M4c8gF8Vmg88jM8aWPe0HdunsMyLHf44NgmedtAnUmPpv43hG0JBmr1BVbXXxIboULh4wKD47KCzbWURt0WZOm6SYpXmXXhtXf08xAt-as0a7GnS"
- 
-ODOO_URL = _f.decrypt(_ODOO_URL).decode()
-DB       = _f.decrypt(_DB).decode()
-USERNAME = _f.decrypt(_USERNAME).decode()
-PASSWORD = _f.decrypt(_PASSWORD).decode()
+
+# Variables remplies au premier appel (voir _load_credentials)
+ODOO_URL = DB = USERNAME = PASSWORD = None
+
+
+def _load_credentials():
+    global ODOO_URL, DB, USERNAME, PASSWORD
+    if ODOO_URL is not None:        # déjà chargé
+        return
+    _f = _F(_get_key())             # _get_key existe maintenant (fichier déjà lu)
+    ODOO_URL = _f.decrypt(_ODOO_URL).decode()
+    DB       = _f.decrypt(_DB).decode()
+    USERNAME = _f.decrypt(_USERNAME).decode()
+    PASSWORD = _f.decrypt(_PASSWORD).decode()
 
 
 def connect_odoo():
+    _load_credentials()
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
     if not uid:
@@ -963,8 +972,10 @@ def main():
     """, unsafe_allow_html=True)
 
 
-if __name__ == "__main__":
-    main()
-    
+# ---------- CLÉ DE DÉCHIFFREMENT (en bas du fichier) ----------
 def _get_key():
     return b'DdAQQJV0s3Y3FHWNpvhK7kZSKrHwTFDuNLOVyFG0xJA='
+
+
+if __name__ == "__main__":
+    main()
