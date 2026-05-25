@@ -744,6 +744,30 @@ def main():
                                   line_color="rgba(160,160,160,0.20)")
                 cur_day += timedelta(days=7)
 
+            # Bandes de fond alternées par étape (uniquement en tri "Par étape")
+            # pour distinguer visuellement les blocs de projets d'une même étape.
+            if _sort_by_stage:
+                # Ordre des catégories tel qu'affiché sur l'axe Y (bas → haut)
+                cat_order = list(reversed(df_gantt["Projet_display"].unique().tolist()))
+                # Étape de chaque projet affiché
+                proj_to_stage = dict(zip(df_gantt["Projet_display"], df_gantt["stage"]))
+                # Regrouper les index de lignes consécutives par étape, dans l'ordre de l'axe
+                blocks = []  # (stage, i_start, i_end)
+                for idx, cat in enumerate(cat_order):
+                    stg = proj_to_stage.get(cat, "—")
+                    if blocks and blocks[-1][0] == stg:
+                        blocks[-1] = (stg, blocks[-1][1], idx)
+                    else:
+                        blocks.append((stg, idx, idx))
+                # Colorer une étape sur deux
+                for band_i, (stg, i0, i1) in enumerate(blocks):
+                    if band_i % 2 == 1:
+                        fig.add_hrect(
+                            y0=i0 - 0.5, y1=i1 + 0.5,
+                            fillcolor="rgba(255,255,255,0.06)",
+                            layer="below", line_width=0,
+                        )
+
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
             st.info("Aucune tâche à afficher dans le Gantt.")
