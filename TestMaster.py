@@ -485,15 +485,16 @@ def load_all_analytics(_uid, _models, project_list):
 # Ordre voulu pour le tri "Par étape" du Gantt.
 # Les libellés Odoo sont normalisés en minuscules avant comparaison,
 # donc l'ordre est insensible à la casse et aux accents partiels.
-STAGE_ORDER = ["kickoff", "technique étude", "appro", "atelier", "montage", "reception et ce"]
+STAGE_ORDER = ["kick-off", "technique / étude", "approvisionnement", "atelier",
+               "livraison et montage", "récepton et ce", "facture finale"]
 
 def _stage_rank(stage_name):
     """Renvoie le rang de l'étape selon STAGE_ORDER ; inconnues placées à la fin."""
     s = (stage_name or "").lower().strip()
-    for i, label in enumerate(STAGE_ORDER):
-        if label in s or s in label:
-            return i
-    return len(STAGE_ORDER)
+    try:
+        return STAGE_ORDER.index(s)
+    except ValueError:
+        return len(STAGE_ORDER)
 
 
 COLOR_ORDER = ["Soudure", "Peinture", "Assemblage", "Câblage", "Test",
