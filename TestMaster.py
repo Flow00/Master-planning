@@ -704,6 +704,24 @@ def main():
                     trace.name = trace.name.replace("__done", "")
 
             n_proj = len(df_gantt["Projet_display"].unique())
+
+            # --- DIAGNOSTIC TEMPORAIRE (à retirer ensuite) ---
+            _n_proj_charges   = len(projects)
+            _n_proj_avec_tache = df_gantt["Projet"].nunique()
+            _n_lignes_axe      = df_gantt["Projet_display"].nunique()
+            st.caption(
+                f"DIAG — projets chargés: {_n_proj_charges} · "
+                f"projets avec ≥1 tâche: {_n_proj_avec_tache} · "
+                f"lignes sur l'axe: {_n_lignes_axe} · "
+                f"mode étape: {_sort_by_stage}"
+            )
+            # collisions de libellés (2 projets distincts → même Projet_display)
+            _collisions = (df_gantt.groupby("Projet_display")["code"].nunique())
+            _collisions = _collisions[_collisions > 1]
+            if len(_collisions):
+                st.caption(f"DIAG — libellés partagés par plusieurs codes projet: {list(_collisions.index)}")
+            # --- FIN DIAGNOSTIC ---
+
             fig.update_layout(
                 barmode="overlay",
                 dragmode="pan",
