@@ -681,9 +681,20 @@ def main():
             df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
             if _sort_by_stage:
-                # L'axe Y du Gantt est inversé (reversed plus bas), donc on inverse
-                # le rang pour que kickoff s'affiche en haut et reception/CE en bas.
-                df_gantt["stage_rank"] = df_gantt["stage"].apply(lambda s: -_stage_rank(s))
+                # Tri par étape. On veut, du HAUT vers le BAS :
+                #   facture finale (étape la plus avancée) → ... → kick-off,
+                #   puis les projets SANS rang tout en bas.
+                # L'axe Y est inversé (reversed plus bas) : 1re ligne triée = en bas.
+                # Donc tri ascendant : inconnus (plus petit), puis rang croissant.
+                _UNKNOWN = len(STAGE_ORDER)  # rang des étapes non listées
+
+                def _rank_for_sort(stage_name):
+                    r = _stage_rank(stage_name)
+                    # connus  : r  (kick-off=0 en bas des connus, facture=6 en haut)
+                    # inconnus: -1 → encore plus bas que kick-off
+                    return -1 if r >= _UNKNOWN else r
+
+                df_gantt["stage_rank"] = df_gantt["stage"].apply(_rank_for_sort)
                 df_gantt = df_gantt.sort_values(["stage_rank", "code"])
                 df_gantt["Projet_display"] = df_gantt["Projet"]
             else:
@@ -728,23 +739,6 @@ def main():
                     trace.name = trace.name.replace("__done", "")
 
             n_proj = len(df_gantt["Projet_display"].unique())
-
-            # --- DIAGNOSTIC TEMPORAIRE (à retirer ensuite) ---
-            _n_proj_charges   = len(projects)
-            _n_proj_avec_tache = df_gantt["Projet"].nunique()
-            _n_lignes_axe      = df_gantt["Projet_display"].nunique()
-            st.caption(
-                f"DIAG — projets chargés: {_n_proj_charges} · "
-                f"projets avec ≥1 tâche: {_n_proj_avec_tache} · "
-                f"lignes sur l'axe: {_n_lignes_axe} · "
-                f"mode étape: {_sort_by_stage}"
-            )
-            # collisions de libellés (2 projets distincts → même Projet_display)
-            _collisions = (df_gantt.groupby("Projet_display")["code"].nunique())
-            _collisions = _collisions[_collisions > 1]
-            if len(_collisions):
-                st.caption(f"DIAG — libellés partagés par plusieurs codes projet: {list(_collisions.index)}")
-            # --- FIN DIAGNOSTIC ---
 
             fig.update_layout(
                 barmode="overlay",
