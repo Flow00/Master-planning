@@ -616,7 +616,11 @@ def main():
         tasks    = get_tasks(uid, models, [p['id'] for p in projects], weeks[0][1], weeks[-1][2])
         grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
 
-        st.subheader("Gantt")
+        _gt1, _gt2 = st.columns([4, 1])
+        with _gt1:
+            st.subheader("Gantt")
+        with _gt2:
+            _sort_by_stage = st.toggle("Par étape", value=False, key="gantt_sort_stage")
         today      = date.today()
         start_view = today
         end_view   = today + timedelta(days=30 * months)
@@ -650,10 +654,6 @@ def main():
 
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
-            # Toggle: tri par code projet (défaut) ou par étape Odoo
-            _tc1, _tc2 = st.columns([4, 1])
-            with _tc2:
-                _sort_by_stage = st.toggle("Par étape", value=False, key="gantt_sort_stage")
             _stage_map = {project_label(p): p.get("stage", "—") for p in projects}
             df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
@@ -663,16 +663,6 @@ def main():
                 df_gantt["stage_rank"] = df_gantt["stage"].apply(lambda s: -_stage_rank(s))
                 df_gantt = df_gantt.sort_values(["stage_rank", "code"])
                 df_gantt["Projet_display"] = df_gantt["Projet"]
-
-                # --- DEBUG TEMPORAIRE : étapes lues dans Odoo + rang calculé ---
-                # À supprimer une fois l'ordre validé.
-                _dbg = (df_gantt[["stage"]].drop_duplicates()
-                        .assign(rang_brut=lambda d: d["stage"].apply(_stage_rank))
-                        .sort_values("rang_brut"))
-                with st.expander("DEBUG étapes (à retirer ensuite)"):
-                    st.write("STAGE_ORDER attendu :", STAGE_ORDER)
-                    st.dataframe(_dbg, use_container_width=True)
-                # --- FIN DEBUG ---
             else:
                 df_gantt = df_gantt.sort_values("code")
                 df_gantt["Projet_display"] = df_gantt["Projet"]
