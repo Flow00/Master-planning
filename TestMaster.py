@@ -652,8 +652,31 @@ def main():
                 "color":        color,
             })
 
+        # Construire la liste des barres ; ajouter une ligne "fantôme" invisible
+        # pour chaque projet sans tâche planifiée, afin qu'il apparaisse quand même.
+        _labels_avec_tache = {row["Projet"] for row in gantt_data}
+        for proj in projects:
+            lbl = project_label(proj)
+            if lbl in _labels_avec_tache:
+                continue
+            # Barre invisible (largeur nulle) juste pour réserver la ligne sur l'axe
+            gantt_data.append({
+                "Tâche":        "(aucune tâche planifiée)",
+                "Projet":       lbl,
+                "Début":        today,
+                "Fin":          today,
+                "Type":         "Autres",
+                "is_done":      False,
+                "deadline_str": "",
+                "color":        "rgba(0,0,0,0)",
+                "_empty":       True,
+            })
+
         if gantt_data:
             df_gantt = pd.DataFrame(gantt_data)
+            if "_empty" not in df_gantt.columns:
+                df_gantt["_empty"] = False
+            df_gantt["_empty"] = df_gantt["_empty"].fillna(False).astype(bool)
             _stage_map = {project_label(p): p.get("stage", "—") for p in projects}
             df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
@@ -683,7 +706,8 @@ def main():
             df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
             
             # Safety net: any row where Fin <= Début gets +1 day
-            mask = df_gantt["Fin"] <= df_gantt["Début"]
+            # (sauf les lignes fantômes, qui doivent rester invisibles)
+            mask = (df_gantt["Fin"] <= df_gantt["Début"]) & (~df_gantt["_empty"])
             df_gantt.loc[mask, "Fin"] = df_gantt.loc[mask, "Début"] + pd.Timedelta(days=1)
 
             fig = px.timeline(
