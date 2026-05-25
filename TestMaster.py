@@ -657,7 +657,9 @@ def main():
             df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
             if _sort_by_stage:
-                df_gantt["stage_rank"] = df_gantt["stage"].apply(_stage_rank)
+                # L'axe Y du Gantt est inversé (reversed plus bas), donc on inverse
+                # le rang pour que kickoff s'affiche en haut et reception/CE en bas.
+                df_gantt["stage_rank"] = df_gantt["stage"].apply(lambda s: -_stage_rank(s))
                 df_gantt = df_gantt.sort_values(["stage_rank", "code"])
                 df_gantt["Projet_display"] = df_gantt["Projet"]
             else:
