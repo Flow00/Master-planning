@@ -184,7 +184,9 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
     return projects
 
 
-def get_tasks(uid, models, project_ids, start_date, end_date):
+@st.cache_data(ttl=300)
+def get_tasks(_uid, _models, project_ids, start_date, end_date):
+    uid, models = _uid, _models
     # Détection du champ date de début selon la version Odoo
     # On essaie planned_date_begin (Odoo 16/17) puis date_start (14/15)
     start_field = None
@@ -319,6 +321,18 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     formatted.sort(key=lambda x: x["Rank"])
     counts["total"] = sum(counts[k] for k in ("orange", "grey", "white", "green", "blue"))
     return counts, formatted
+
+
+@st.cache_data(ttl=300)
+def compute_all_purchase_data(_uid, _models, filter_mode):
+    """Pré-calcule purchase_data pour TOUS les projets actifs (non filtrés).
+    Mis en cache pour que le filtre projet global ne déclenche pas de recalcul."""
+    uid, models = _uid, _models
+    projects = load_projects(uid, models, filter_mode)
+    po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
+    purchase_data = {p["id"]: get_purchase_for_project(p, po_lines, policy_map, buyer_map, po_name_map)
+                     for p in projects}
+    return purchase_data, projects
 
 
 @st.cache_data(ttl=300)
@@ -675,12 +689,23 @@ def main():
 
     # ── ONGLET 1 : PLANNING ──────────────────────────────────────
     with tab1:
-        projects = load_projects(uid, models, fm)
+        # On charge TOUS les projets actifs et leurs tâches sans tenir compte du filtre
+        # projet global ici : les @st.cache_data restent valides quel que soit ce filtre,
+        # donc bascule filtre/défiltre = instantanée après le premier chargement.
+        projects_all_active = load_projects(uid, models, fm)
+        months = st.session_state["months"]
+        weeks  = build_weeks_horizon(months)
+        # Tuple trié → hash stable et identique quel que soit le filtre projet global
+        _all_pids = tuple(sorted(p["id"] for p in projects_all_active))
+        all_tasks = get_tasks(uid, models, _all_pids, weeks[0][1], weeks[-1][2])
 
-        # Filtre projet global : on isole le projet sélectionné (s'il fait partie
-        # des projets actifs). Sinon on respecte le filtre habituel.
+        # Maintenant on applique le filtre projet global au niveau de l'affichage
         if GLOBAL_PROJECT_ID is not None:
-            projects = [p for p in projects if p["id"] == GLOBAL_PROJECT_ID]
+            projects = [p for p in projects_all_active if p["id"] == GLOBAL_PROJECT_ID]
+        else:
+            projects = projects_all_active
+        _pids_visibles = {p["id"] for p in projects}
+        tasks = [t for t in all_tasks if t["project_id"][0] in _pids_visibles]
 
         # Titre Gantt + slider mois à droite (le toggle "Par étape" est masqué)
         _gt1, _gt2 = st.columns([4, 1])
@@ -692,12 +717,9 @@ def main():
             if new_months != st.session_state["months"]:
                 st.session_state["months"] = new_months
                 st.rerun()
-        months = st.session_state["months"]
         # Toggle "Par étape" masqué — on conserve juste la variable à False.
         _sort_by_stage = False
 
-        weeks    = build_weeks_horizon(months)
-        tasks    = get_tasks(uid, models, [p['id'] for p in projects], weeks[0][1], weeks[-1][2])
         today      = date.today()
         start_view = today
         end_view   = today + timedelta(days=30 * months)
@@ -863,17 +885,15 @@ def main():
     # ── ONGLET 2 : PURCHASES ─────────────────────────────────────
     with tab2:
         st.markdown("### Purchases par projet")
-        projects_all = load_projects(uid, models, fm)
+
+        # Pré-calcul caché pour TOUS les projets actifs : le filtre projet global
+        # ne déclenche plus de recalcul, juste un re-filtrage côté Python.
+        purchase_data, projects_all = compute_all_purchase_data(uid, models, fm)
 
         # Filtre projet global : isoler ce projet uniquement (s'il fait partie
         # des projets actifs ; sinon on respecte le filtre habituel).
         if GLOBAL_PROJECT_ID is not None:
             projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
-
-        po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
-
-        purchase_data = {p['id']: get_purchase_for_project(p, po_lines, policy_map, buyer_map, po_name_map)
-                         for p in projects_all}
 
         # Tri : projets avec items en retard en premier (grey = commandés mais
         # non reçus avec date passée ; orange = partiellement reçus).
@@ -890,25 +910,24 @@ def main():
                     tot   = max(sm["total"], 1)
                     late  = sm["grey"] + sm["orange"]
                     tc    = "red" if sm["grey"] > 0 else "#FFA000" if sm["orange"] > 0 else "white"
-                    # Cadre extérieur rouge si en retard, transparent sinon.
-                    # Progress bar elle-même garde un contour blanc neutre.
-                    outer_border = "2px solid #e53935" if late > 0 else "1px solid transparent"
-                    if st.button(f"{p['company']}\n {short_desc(clean_description_from_display_name(p['display_name']), 25)}",
-                                 key=f"proj_btn_{p['id']}"):
+                    # Bouton en rouge (type="primary") si retard ; secondary sinon.
+                    if st.button(
+                        f"{p['company']}\n {short_desc(clean_description_from_display_name(p['display_name']), 25)}",
+                        key=f"proj_btn_{p['id']}",
+                        type="primary" if late > 0 else "secondary",
+                    ):
                         st.session_state["selected_purchase_project_id"] = p['id']
                     st.markdown(f"""
-                        <div style="border:{outer_border};border-radius:6px;padding:4px;margin-top:-4px;">
-                          <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
-                              display:flex;border:1px solid #FFFFFF;">
-                              <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
-                              <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
-                              <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
-                              <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
-                              <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
-                          </div>
-                          <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
-                              {sm['green']} / {sm['total']} lignes
-                          </div>
+                        <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
+                            display:flex;border:1px solid #FFFFFF;margin-top:4px;">
+                            <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
+                            <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
+                            <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
+                            <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
+                            <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
+                        </div>
+                        <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
+                            {sm['green']} / {sm['total']} lignes
                         </div>""",
                         unsafe_allow_html=True)
 
