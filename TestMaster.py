@@ -638,6 +638,12 @@ def main():
     </style>""", unsafe_allow_html=True)
 
     try:
+        # IMPORTANT : appeler _load_credentials() à CHAQUE rerun, indépendamment
+        # du cache. Sinon, si Streamlit redémarre le module Python, les globales
+        # DB/USERNAME/PASSWORD reviennent à None mais connect_odoo (cached_resource)
+        # renvoie sa valeur cachée sans rappeler _load_credentials, et tous les
+        # appels Odoo plantent ensuite avec "cannot marshal None".
+        _load_credentials()
         uid, models = connect_odoo()
     except Exception as e:
         st.error(f"Connexion Odoo impossible : {e}")
