@@ -643,28 +643,31 @@ def main():
                     _cur_idx = i
                     break
 
-        st.markdown("**Filtre projet**")
-        _sel_label = st.selectbox(
-            "Filtre projet",
-            options=_opt_labels,
-            index=_cur_idx,
-            placeholder="Tous",
-            key="global_project_selectbox",
-            label_visibility="collapsed",
-        )
+        # Selectbox + croix à droite (croix visible seulement si filtre actif)
+        _has_filter = st.session_state.get("global_project_filter") is not None
+        _csel, _cclr = st.columns([5, 1])
+        with _csel:
+            _sel_label = st.selectbox(
+                "Filtre projet",
+                options=_opt_labels,
+                index=_cur_idx,
+                placeholder="Filtre projet",
+                key="global_project_selectbox",
+                label_visibility="collapsed",
+            )
+        with _cclr:
+            if _has_filter:
+                if st.button("✕", key="clear_global_filter",
+                             help="Effacer le filtre",
+                             use_container_width=True):
+                    st.session_state["global_project_filter"] = None
+                    st.session_state.pop("global_project_selectbox", None)
+                    st.rerun()
+
         _new_id = _label_to_id.get(_sel_label) if _sel_label else None
         if _new_id != st.session_state.get("global_project_filter"):
             st.session_state["global_project_filter"] = _new_id
             st.rerun()
-
-        # Bouton "Effacer" visible seulement si un filtre est actif
-        if st.session_state.get("global_project_filter") is not None:
-            if st.button("✕ Effacer le filtre", key="clear_global_filter",
-                         use_container_width=True):
-                st.session_state["global_project_filter"] = None
-                # Reset aussi la selectbox pour que l'UI revienne à "Tous"
-                st.session_state.pop("global_project_selectbox", None)
-                st.rerun()
 
     GLOBAL_PROJECT_ID = st.session_state.get("global_project_filter")
 
