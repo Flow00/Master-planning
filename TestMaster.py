@@ -105,7 +105,12 @@ def load_projects(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
 
-    base = [('stage_id.name', 'not in', ['Cloturé', 'Cloture', 'Template', 'Annulé', 'Annule'])]
+    # `active=True` exclut les projets archivés.
+    # On exclut aussi les stages clôturés / template / annulés (variantes).
+    base = [
+        ('active', '=', True),
+        ('stage_id.name', 'not in', ['Cloturé', 'Cloture', 'Template', 'Annulé', 'Annule', 'Annulée', 'Annulee', 'Cancelled', 'Canceled', 'Cancel']),
+    ]
     if filter_mode == "engineering":
         domain = base + [('tag_ids', 'in', eng), ('tag_ids', 'in', prol)]
     elif filter_mode == "standard":
@@ -115,6 +120,14 @@ def load_projects(_uid, _models, filter_mode="both"):
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
         [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
+
+    # Filet de sécurité Python : exclure tout stage contenant "annul" ou "cancel"
+    # (couvre les libellés exotiques non listés ci-dessus).
+    def _is_cancelled_stage(p):
+        name = (p.get("stage_id")[1] if p.get("stage_id") else "") or ""
+        n = name.lower()
+        return "annul" in n or "cancel" in n
+    projects = [p for p in projects if not _is_cancelled_stage(p)]
 
     company_map = get_top_companies_batch(uid, models, [p["partner_id"] for p in projects])
     for p in projects:
@@ -150,7 +163,10 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
 
-    base = [('stage_id.name', 'not in', ['Template', 'Annulé', 'Annule'])]
+    base = [
+        ('active', '=', True),
+        ('stage_id.name', 'not in', ['Template', 'Annulé', 'Annule', 'Annulée', 'Annulee', 'Cancelled', 'Canceled', 'Cancel']),
+    ]
     if filter_mode == "engineering":
         domain = base + [('tag_ids', 'in', eng), ('tag_ids', 'in', prol)]
     elif filter_mode == "standard":
@@ -160,6 +176,13 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
         [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
+
+    # Filet de sécurité Python : exclure les libellés exotiques "annul"/"cancel".
+    def _is_cancelled_stage(p):
+        name = (p.get("stage_id")[1] if p.get("stage_id") else "") or ""
+        n = name.lower()
+        return "annul" in n or "cancel" in n
+    projects = [p for p in projects if not _is_cancelled_stage(p)]
 
     company_map = get_top_companies_batch(uid, models, [p["partner_id"] for p in projects])
     for p in projects:
