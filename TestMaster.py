@@ -30,6 +30,7 @@ def _load_credentials():
     PASSWORD = _f.decrypt(_PASSWORD).decode()
 
 
+@st.cache_resource
 def connect_odoo():
     _load_credentials()
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
@@ -93,7 +94,9 @@ def fmt_eur(val):
 # LOADERS
 # ============================================================
 
-def _get_tags(uid, models):
+@st.cache_data(ttl=600)
+def _get_tags(_uid, _models):
+    uid, models = _uid, _models
     eng  = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', '=', 'Engineering')]])
     std  = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', '=', 'Standard')]])
     prol = models.execute_kw(DB, uid, PASSWORD, 'project.tags', 'search', [[('name', 'ilike', 'PRO (LIG)')]])
@@ -359,12 +362,21 @@ def compute_all_purchase_data(_uid, _models, filter_mode):
 
 
 @st.cache_data(ttl=300)
-def load_all_analytics(_uid, _models, project_list):
+def load_all_analytics(_uid, _models, filter_mode):
+    """Charge tout l'analytique. Prend filter_mode (string hashable) au lieu
+    d'une liste de dicts coûteuse à hasher → cache stable entre reruns."""
     uid, models = _uid, _models
+
+    project_list = load_projects_with_closed(uid, models, filter_mode)
+    # Exclure les comptes "fourre-tout" (dépannage, vente pure, etc.)
+    bad_accs = ["dépannage (liège)", "projets (lig)", "vente pure (lig)"]
+    project_list = [p for p in project_list
+                    if not (p.get("analytic_account_id")
+                            and p["analytic_account_id"][1].lower() in bad_accs)]
 
     analytic_ids = [p["analytic_account_id"][0] for p in project_list if p.get("analytic_account_id")]
     if not analytic_ids:
-        return {}, pd.DataFrame(), 0.0
+        return {}, pd.DataFrame(), 0.0, project_list
 
     year_now   = date.today().year
     year_start = f"{year_now}-01-01"
@@ -530,7 +542,7 @@ def load_all_analytics(_uid, _models, project_list):
         sum_ca   += d["ca_total"]
     marge_pond = (sum_bene / sum_ca * 100) if sum_ca > 0 else 0.0
 
-    return summary, df_monthly, marge_pond
+    return summary, df_monthly, marge_pond, project_list
 
 
 # ============================================================
@@ -1029,14 +1041,8 @@ def main():
     with tab3:
         st.markdown("### Bilan analytique")
 
-        projects_ana = load_projects_with_closed(uid, models, fm)
-        bad_accs = ["dépannage (liège)", "projets (lig)", "vente pure (lig)"]
-        projects_ana = [p for p in projects_ana
-                        if not (p.get("analytic_account_id")
-                                and p["analytic_account_id"][1].lower() in bad_accs)]
-
         with st.spinner("Chargement analytiques..."):
-            analytics, df_monthly, marge_pond = load_all_analytics(uid, models, projects_ana)
+            analytics, df_monthly, marge_pond, projects_ana = load_all_analytics(uid, models, fm)
 
         if not analytics:
             st.info("Aucune donnée disponible.")
@@ -1060,13 +1066,15 @@ def main():
         mismatch_ids = {p["id"] for p in projects_ana if _is_mismatch(p)}
 
         # ── Statistiques générales : projets NON clôturés (en cours) ──
-        # On exclut les mismatchs des totaux pour éviter de compter deux fois
-        # le CA d'un compte analytique partagé.
+        # On exclut les mismatchs (double comptage compte analytique partagé)
+        # ET les projets entièrement facturés (a_facturer == 0) : ils restent
+        # ouverts pour suivi mais n'ont plus rien à venir.
         actifs = [p for p in projects_ana
                   if not p.get("is_closed")
                   and p["id"] not in mismatch_ids
                   and analytics.get(p["id"])
-                  and analytics[p["id"]]["ca_total"] > 0]
+                  and analytics[p["id"]]["ca_total"] > 0
+                  and abs(analytics[p["id"]]["a_facturer"]) > 0.01]
 
         s_ca_total  = sum(analytics[p["id"]]["ca_total"]   for p in actifs)
         s_a_fac     = sum(analytics[p["id"]]["a_facturer"] for p in actifs)
