@@ -603,7 +603,7 @@ def main():
             st.session_state[k] = v
 
     # Bannière
-    c1, c2, c3 = st.columns([1, 4, 1])
+    c1, c2, c3 = st.columns([1, 4, 1.6])
     with c1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
         st.markdown("<div style='color:green;font-weight:bold;margin-top:20px;'>Connecté Odoo</div>",
@@ -645,7 +645,7 @@ def main():
 
         # Selectbox + croix à droite (croix visible seulement si filtre actif)
         _has_filter = st.session_state.get("global_project_filter") is not None
-        _csel, _cclr = st.columns([5, 1])
+        _csel, _cclr = st.columns([7, 1])
         with _csel:
             _sel_label = st.selectbox(
                 "Filtre projet",
