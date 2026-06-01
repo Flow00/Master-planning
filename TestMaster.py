@@ -1015,9 +1015,30 @@ def main():
             st.info("Aucune donnée disponible.")
             return
 
+        # Détection du mismatch : si le code Sxx-xxxxx extrait du NOM du compte
+        # analytique diffère de celui du projet, c'est qu'on récupère par erreur
+        # les chiffres d'un autre projet. On marque la ligne pour ne pas
+        # double-compter et afficher des tirets dans le tableau.
+        def _is_mismatch(p):
+            aa = p.get("analytic_account_id")
+            if not aa:
+                return False  # pas de compte → traité ailleurs
+            code_proj = extract_project_code(p.get("display_name", ""))
+            code_acc  = extract_project_code(aa[1] or "")
+            # Si un seul des deux codes manque on ne juge pas (pas de doublon créé).
+            if not code_proj or not code_acc:
+                return False
+            return code_proj != code_acc
+
+        mismatch_ids = {p["id"] for p in projects_ana if _is_mismatch(p)}
+
         # ── Statistiques générales : projets NON clôturés (en cours) ──
+        # On exclut les mismatchs des totaux pour éviter de compter deux fois
+        # le CA d'un compte analytique partagé.
         actifs = [p for p in projects_ana
-                  if not p.get("is_closed") and analytics.get(p["id"])
+                  if not p.get("is_closed")
+                  and p["id"] not in mismatch_ids
+                  and analytics.get(p["id"])
                   and analytics[p["id"]]["ca_total"] > 0]
 
         s_ca_total  = sum(analytics[p["id"]]["ca_total"]   for p in actifs)
@@ -1059,15 +1080,19 @@ def main():
             a = analytics.get(p["id"])
             if a is None:
                 continue
+            mm = p["id"] in mismatch_ids
             rows.append({
                 "_closed":    p.get("is_closed", False),
+                "_mismatch":  mm,
                 "Projet":     short_desc(clean_description_from_display_name(p["display_name"]), 45),
                 "Client":     p["company"],
                 "CA":         a["ca_total"],
                 "Dépenses":   a["depenses_all"],
                 "Facturé":    a["facture_all"],
                 "A_fac":      a["a_facturer"],
-                "Marge_PCT":  a["marge_pct"],
+                # Si mismatch, on met NaN pour que le tri par marge place ces
+                # lignes tout en bas (na_position='last') au lieu de fausser l'ordre.
+                "Marge_PCT":  float("nan") if mm else a["marge_pct"],
             })
 
         if not rows:
@@ -1080,8 +1105,8 @@ def main():
                 df_ana = df_ana[df_ana["Projet"].str.lower().str.contains(s)
                                 | df_ana["Client"].str.lower().str.contains(s)]
 
-            # Tri par marge croissante (les marges les plus faibles en haut)
-            df_ana = df_ana.sort_values("Marge_PCT", ascending=True)
+            # Tri par marge croissante ; les mismatchs (NaN) tout en bas.
+            df_ana = df_ana.sort_values("Marge_PCT", ascending=True, na_position="last")
 
             # Colonnes (sans Marge EUR)
             cd = "2fr 1.5fr 100px 110px 100px 110px 80px"
@@ -1099,15 +1124,32 @@ def main():
             body = ""
             for _, row in df_ana.iterrows():
                 cl   = row["_closed"]
+                mm   = row.get("_mismatch", False)
                 bg   = "#0d2a4a" if cl else "rgba(255,255,255,0.03)"
                 bdr  = "1px solid #1a4a7a" if cl else "1px solid #2a2a2a"
-                mc   = "#e53935" if row["Marge_PCT"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
-                afc  = "#e53935" if row["A_fac"] < 0 else "#00ACC1"
-                bdg  = (" <span style='font-size:9px;background:#1565C0;color:white;"
-                        "padding:1px 4px;border-radius:3px;'>Clôturé</span>" if cl else "")
+                # Couleurs marge/à-facturer : neutres si mismatch (tirets)
+                if mm:
+                    mc, afc = "#777", "#777"
+                else:
+                    mc  = "#e53935" if row["Marge_PCT"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
+                    afc = "#e53935" if row["A_fac"] < 0 else "#00ACC1"
+                bdg = ""
+                if cl:
+                    bdg += (" <span style='font-size:9px;background:#1565C0;color:white;"
+                            "padding:1px 4px;border-radius:3px;'>Clôturé</span>")
+                if mm:
+                    bdg += (" <span style='font-size:9px;background:#757575;color:white;"
+                            "padding:1px 4px;border-radius:3px;' title='Compte analytique d un autre projet'>"
+                            "compte ≠</span>")
 
                 def fe(v): return f"{v:,.0f}".replace(",", " ") + " EUR"
                 def fp(v): return f"{v:.1f} %"
+                # Si mismatch : tirets partout sur les valeurs numériques
+                ca_s   = "—" if mm else fe(row['CA'])
+                dep_s  = "—" if mm else fe(row['Dépenses'])
+                fac_s  = "—" if mm else fe(row['Facturé'])
+                afac_s = "—" if mm else fe(row['A_fac'])
+                mpct_s = "—" if mm else fp(row['Marge_PCT'])
 
                 body += f"""<div style="display:grid;grid-template-columns:{cd};column-gap:10px;
                     padding:6px 12px;font-size:13px;background:{bg};border-bottom:{bdr};
@@ -1116,11 +1158,11 @@ def main():
                         {row['Projet']}{bdg}</div>
                     <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;">
                         {row['Client']}</div>
-                    <div style="text-align:right;">{fe(row['CA'])}</div>
-                    <div style="text-align:right;">{fe(row['Dépenses'])}</div>
-                    <div style="text-align:right;">{fe(row['Facturé'])}</div>
-                    <div style="text-align:right;color:{afc};font-weight:600;">{fe(row['A_fac'])}</div>
-                    <div style="text-align:right;color:{mc};">{fp(row['Marge_PCT'])}</div>
+                    <div style="text-align:right;">{ca_s}</div>
+                    <div style="text-align:right;">{dep_s}</div>
+                    <div style="text-align:right;">{fac_s}</div>
+                    <div style="text-align:right;color:{afc};font-weight:600;">{afac_s}</div>
+                    <div style="text-align:right;color:{mc};">{mpct_s}</div>
                 </div>"""
 
             st.markdown(f"""<div style="border:1px solid #333;border-radius:6px;overflow:hidden;
