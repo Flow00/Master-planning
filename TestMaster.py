@@ -635,7 +635,8 @@ def main():
 
     for k, v in [("months", 3), ("selected_purchase_project_id", None),
                  ("filter_engineering", True), ("filter_standard", False),
-                 ("global_project_filter", None)]:
+                 ("global_project_filter", None),
+                 ("global_project_selectbox_nonce", 0)]:
         if k not in st.session_state:
             st.session_state[k] = v
 
@@ -682,6 +683,9 @@ def main():
 
         # Selectbox + croix à droite (croix visible seulement si filtre actif)
         _has_filter = st.session_state.get("global_project_filter") is not None
+        # Key dynamique : on incrémente le nonce au reset pour forcer le widget
+        # à se vider visuellement (Streamlit ne reset pas toujours via pop).
+        _sel_key = f"global_project_selectbox_{st.session_state['global_project_selectbox_nonce']}"
         _csel, _cclr = st.columns([7, 1])
         with _csel:
             _sel_label = st.selectbox(
@@ -689,7 +693,7 @@ def main():
                 options=_opt_labels,
                 index=_cur_idx,
                 placeholder="Filtre projet",
-                key="global_project_selectbox",
+                key=_sel_key,
                 label_visibility="collapsed",
             )
         with _cclr:
@@ -698,7 +702,7 @@ def main():
                              help="Effacer le filtre",
                              use_container_width=True):
                     st.session_state["global_project_filter"] = None
-                    st.session_state.pop("global_project_selectbox", None)
+                    st.session_state["global_project_selectbox_nonce"] += 1
                     st.rerun()
 
         _new_id = _label_to_id.get(_sel_label) if _sel_label else None
