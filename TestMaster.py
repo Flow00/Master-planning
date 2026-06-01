@@ -114,13 +114,22 @@ def load_projects(_uid, _models, filter_mode="both"):
         domain = base + ['|', ('tag_ids', 'in', eng), ('tag_ids', 'in', std), ('tag_ids', 'in', prol)]
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
-        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id']})
+        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
 
     company_map = get_top_companies_batch(uid, models, [p["partner_id"] for p in projects])
     for p in projects:
         pid = p["partner_id"][0] if p["partner_id"] else None
         p["company"] = company_map.get(pid, "N/A")
         p["stage"]   = p["stage_id"][1] if p.get("stage_id") else "—"
+        # date de fin du projet : champ "date" sur project.project (peut être False)
+        raw = p.get("date")
+        if raw:
+            try:
+                p["date_end"] = datetime.strptime(str(raw).split(" ")[0], "%Y-%m-%d").date()
+            except Exception:
+                p["date_end"] = None
+        else:
+            p["date_end"] = None
 
     ids = [p["id"] for p in projects]
     updates = models.execute_kw(DB, uid, PASSWORD, 'project.update', 'search_read',
@@ -150,7 +159,7 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         domain = base + ['|', ('tag_ids', 'in', eng), ('tag_ids', 'in', std), ('tag_ids', 'in', prol)]
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
-        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id']})
+        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
 
     company_map = get_top_companies_batch(uid, models, [p["partner_id"] for p in projects])
     for p in projects:
@@ -158,6 +167,15 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         p["company"] = company_map.get(pid, "N/A")
         stage_name = p["stage_id"][1] if p.get("stage_id") else ""
         p["is_closed"] = "clotu" in stage_name.lower()
+        p["stage"]     = stage_name or "—"
+        raw = p.get("date")
+        if raw:
+            try:
+                p["date_end"] = datetime.strptime(str(raw).split(" ")[0], "%Y-%m-%d").date()
+            except Exception:
+                p["date_end"] = None
+        else:
+            p["date_end"] = None
 
     projects.sort(key=lambda p: (
         1 if p["is_closed"] else 0,
@@ -579,7 +597,8 @@ def main():
     st_autorefresh(interval=600000, key="refresh_10min")
 
     for k, v in [("months", 3), ("selected_purchase_project_id", None),
-                 ("filter_engineering", True), ("filter_standard", False)]:
+                 ("filter_engineering", True), ("filter_standard", False),
+                 ("global_project_filter", None)]:
         if k not in st.session_state:
             st.session_state[k] = v
 
@@ -606,60 +625,108 @@ def main():
             st.session_state["filter_standard"] = fs
             st.rerun()
 
+    # Filtre projet global (s'applique aux 3 onglets)
+    _all_projects = load_projects_with_closed(uid, models, fm)
+    _global_options = sorted(
+        [(p["id"], project_label(p)) for p in _all_projects],
+        key=lambda t: t[1].lower()
+    )
+    _opt_labels = [lbl for _, lbl in _global_options]
+    _label_to_id = {lbl: pid for pid, lbl in _global_options}
+
+    # index courant à partir de session_state
+    _cur_id = st.session_state.get("global_project_filter")
+    _cur_idx = None
+    if _cur_id is not None:
+        for i, (pid, _) in enumerate(_global_options):
+            if pid == _cur_id:
+                _cur_idx = i
+                break
+
+    _sel_label = st.selectbox(
+        "Filtre projet (sur les 3 onglets)",
+        options=_opt_labels,
+        index=_cur_idx,
+        placeholder="Tous les projets — cliquer pour filtrer sur un seul",
+        key="global_project_selectbox",
+    )
+    _new_id = _label_to_id.get(_sel_label) if _sel_label else None
+    if _new_id != st.session_state.get("global_project_filter"):
+        st.session_state["global_project_filter"] = _new_id
+        st.rerun()
+    GLOBAL_PROJECT_ID = st.session_state.get("global_project_filter")
+
     tab1, tab2, tab3 = st.tabs(["Planning", "Purchases", "Analytique"])
 
     # ── ONGLET 1 : PLANNING ──────────────────────────────────────
     with tab1:
         projects = load_projects(uid, models, fm)
-        months   = st.session_state["months"]
-        weeks    = build_weeks_horizon(months)
-        tasks    = get_tasks(uid, models, [p['id'] for p in projects], weeks[0][1], weeks[-1][2])
-        grid, detailed = map_tasks_to_grid(projects, tasks, weeks)
 
+        # Filtre projet global : on isole le projet sélectionné (s'il fait partie
+        # des projets actifs). Sinon on respecte le filtre habituel.
+        if GLOBAL_PROJECT_ID is not None:
+            projects = [p for p in projects if p["id"] == GLOBAL_PROJECT_ID]
+
+        # Titre Gantt + slider mois à droite (le toggle "Par étape" est masqué)
         _gt1, _gt2 = st.columns([4, 1])
         with _gt1:
             st.subheader("Gantt")
         with _gt2:
-            _sort_by_stage = st.toggle("Par étape", value=False, key="gantt_sort_stage")
+            new_months = st.slider("Mois", 1, 6, st.session_state["months"],
+                                   key="planning_months_slider", label_visibility="collapsed")
+            if new_months != st.session_state["months"]:
+                st.session_state["months"] = new_months
+                st.rerun()
+        months = st.session_state["months"]
+        # Toggle "Par étape" masqué — on conserve juste la variable à False.
+        _sort_by_stage = False
+
+        weeks    = build_weeks_horizon(months)
+        tasks    = get_tasks(uid, models, [p['id'] for p in projects], weeks[0][1], weeks[-1][2])
         today      = date.today()
         start_view = today
         end_view   = today + timedelta(days=30 * months)
+
+        # Libellé d'affichage : orange si pas de date de fin projet dans Odoo.
+        # Plotly accepte du HTML dans les ticktext (<span style="color:..">).
+        def _proj_display_label(proj):
+            base = project_label(proj)
+            if proj.get("date_end") is None:
+                return f"<span style='color:#FFA000'>{base}</span>"
+            return base
+        _id_to_display = {p["id"]: _proj_display_label(p) for p in projects}
 
         gantt_data = []
         for t in tasks:
             proj = next((p for p in projects if p['id'] == t['project_id'][0]), None)
             if not proj:
                 continue
-            label    = project_label(proj)
+            label    = _id_to_display[proj["id"]]
             task_type = classify_task_type(t["name"])
-            # Couleur selon l'état terminé ou non
             color = COLOR_MAP_DONE[task_type] if t.get("is_done") else COLOR_MAP[task_type]
-            
-            # AFTER — guarantee minimum 1-day width:
+
             start_dt = t["date_start"]
             end_dt   = t["date_deadline"]
-            if start_dt >= end_dt:          # same-day or bad data → force 1-day bar
+            if start_dt >= end_dt:
                 end_dt = start_dt + timedelta(days=1)
-            
+
             gantt_data.append({
                 "Tâche":        t["name"],
                 "Projet":       label,
                 "Début":        start_dt,
-                "Fin":          end_dt,       # ← use end_dt, not t["date_deadline"]
+                "Fin":          end_dt,
                 "Type":         task_type,
                 "is_done":      t.get("is_done", False),
                 "deadline_str": str(t["date_deadline"]),
                 "color":        color,
             })
 
-        # Construire la liste des barres ; ajouter une ligne "fantôme" invisible
-        # pour chaque projet sans tâche planifiée, afin qu'il apparaisse quand même.
+        # Ligne fantôme pour les projets sans tâche planifiée
         _labels_avec_tache = {row["Projet"] for row in gantt_data}
         for proj in projects:
-            lbl = project_label(proj)
+            lbl = _id_to_display[proj["id"]]
             if lbl in _labels_avec_tache:
                 continue
-            # Barre invisible (largeur nulle) juste pour réserver la ligne sur l'axe
             gantt_data.append({
                 "Tâche":        "(aucune tâche planifiée)",
                 "Projet":       lbl,
@@ -677,47 +744,28 @@ def main():
             if "_empty" not in df_gantt.columns:
                 df_gantt["_empty"] = False
             df_gantt["_empty"] = df_gantt["_empty"].fillna(False).astype(bool)
-            _stage_map = {project_label(p): p.get("stage", "—") for p in projects}
-            df_gantt["stage"] = df_gantt["Projet"].map(_stage_map).fillna("—")
+
+            # Date de fin du projet (depuis projects), pour le tri Gantt
+            _label_to_date_end = {_id_to_display[p["id"]]: p.get("date_end") for p in projects}
+            df_gantt["date_end_proj"] = pd.to_datetime(
+                df_gantt["Projet"].map(_label_to_date_end), errors="coerce")
+
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
-            if _sort_by_stage:
-                # Tri par étape. On veut, du HAUT vers le BAS :
-                #   facture finale (étape la plus avancée) → ... → kick-off,
-                #   puis les projets SANS rang tout en bas.
-                # L'axe Y est inversé (reversed plus bas) : 1re ligne triée = en bas.
-                # Donc tri ascendant : inconnus (plus petit), puis rang croissant.
-                _UNKNOWN = len(STAGE_ORDER)  # rang des étapes non listées
+            # Tri : date de fin descendante (les plus proches en haut, axe inversé).
+            # Les projets sans date_end vont tout en bas (na_position='first' en desc).
+            df_gantt = df_gantt.sort_values(
+                ["date_end_proj", "code"],
+                ascending=[False, True],
+                na_position="first",
+            )
+            df_gantt["Projet_display"] = df_gantt["Projet"]
 
-                def _rank_for_sort(stage_name):
-                    r = _stage_rank(stage_name)
-                    # connus  : r  (kick-off=0 en bas des connus, facture=6 en haut)
-                    # inconnus: -1 → encore plus bas que kick-off
-                    return -1 if r >= _UNKNOWN else r
-
-                df_gantt["stage_rank"] = df_gantt["stage"].apply(_rank_for_sort)
-                df_gantt = df_gantt.sort_values(["stage_rank", "code"])
-                df_gantt["Projet_display"] = df_gantt["Projet"]
-            else:
-                df_gantt = df_gantt.sort_values("code")
-                df_gantt["Projet_display"] = df_gantt["Projet"]
-
-            # color_key = "Type" pour les tâches actives, "Type__done" pour les terminées
-            # Ainsi px.timeline crée des traces séparées, on masque __done de la légende après.
             df_gantt["Légende"] = df_gantt.apply(
                 lambda r: r["Type"] + "__done" if r["is_done"] else r["Type"], axis=1)
-
-            # color_discrete_map complet : couleurs normales + assombries
             full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
 
-            # Juste avant px.timeline :
             df_gantt["Début"] = pd.to_datetime(df_gantt["Début"])
             df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
-
-            df_gantt["Début"] = pd.to_datetime(df_gantt["Début"])
-            df_gantt["Fin"]   = pd.to_datetime(df_gantt["Fin"])
-            
-            # Safety net: any row where Fin <= Début gets +1 day
-            # (sauf les lignes fantômes, qui doivent rester invisibles)
             mask = (df_gantt["Fin"] <= df_gantt["Début"]) & (~df_gantt["_empty"])
             df_gantt.loc[mask, "Fin"] = df_gantt.loc[mask, "Début"] + pd.Timedelta(days=1)
 
@@ -730,16 +778,12 @@ def main():
                 hover_data={"Début": True, "Fin": True, "Type": True, "Projet_display": False,
                             "Légende": False, "is_done": False},
             )
-
-            # Renommer les traces normales (retirer le suffixe __done inexistant)
-            # et masquer les traces __done de la légende
             for trace in fig.data:
                 if trace.name.endswith("__done"):
                     trace.showlegend = False
                     trace.name = trace.name.replace("__done", "")
 
             n_proj = len(df_gantt["Projet_display"].unique())
-
             fig.update_layout(
                 barmode="overlay",
                 dragmode="pan",
@@ -756,11 +800,8 @@ def main():
                             xanchor="center", x=0.5, font=dict(size=10))
             )
             fig.update_xaxes(range=[start_view, end_view])
-
-            # Ligne aujourd'hui
             fig.add_vline(x=today, line_width=2, line_color="white", opacity=0.9)
 
-            # Séparateurs mois
             cur = date(today.year, today.month, 1)
             while True:
                 cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
@@ -768,7 +809,6 @@ def main():
                     break
                 fig.add_vline(x=cur, line_width=1, line_dash="dot", line_color="rgba(200,200,200,0.35)")
 
-            # Séparateurs week-end
             cur_day = today - timedelta(days=today.weekday())
             while cur_day <= end_view:
                 sat = cur_day + timedelta(days=5)
@@ -780,49 +820,17 @@ def main():
                                   line_color="rgba(160,160,160,0.20)")
                 cur_day += timedelta(days=7)
 
-            # Bandes de fond alternées par étape (uniquement en tri "Par étape")
-            # pour distinguer visuellement les blocs de projets d'une même étape.
-            if _sort_by_stage:
-                # Ordre des catégories tel qu'affiché sur l'axe Y (bas → haut)
-                cat_order = list(reversed(df_gantt["Projet_display"].unique().tolist()))
-                # Étape de chaque projet affiché
-                proj_to_stage = dict(zip(df_gantt["Projet_display"], df_gantt["stage"]))
-                # Regrouper les index de lignes consécutives par étape, dans l'ordre de l'axe
-                blocks = []  # (stage, i_start, i_end)
-                for idx, cat in enumerate(cat_order):
-                    stg = proj_to_stage.get(cat, "—")
-                    if blocks and blocks[-1][0] == stg:
-                        blocks[-1] = (stg, blocks[-1][1], idx)
-                    else:
-                        blocks.append((stg, idx, idx))
-                # Colorer une étape sur deux
-                for band_i, (stg, i0, i1) in enumerate(blocks):
-                    if band_i % 2 == 1:
-                        fig.add_hrect(
-                            y0=i0 - 0.5, y1=i1 + 0.5,
-                            fillcolor="rgba(255,255,255,0.06)",
-                            layer="below", line_width=0,
-                        )
-
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
-            st.info("Aucune tâche à afficher dans le Gantt.")
+            st.info("Aucun projet à afficher avec ce filtre.")
 
-        c_sl, c_nb = st.columns([3, 1])
-        with c_sl:
-            new_months = st.slider("", 1, 6, months)
-        with c_nb:
-            st.markdown(f"<div style='margin-top:10px;font-size:14px;'>Projets : <b>{len(projects)}</b></div>",
-                        unsafe_allow_html=True)
-        if new_months != months:
-            st.session_state["months"] = new_months
-            st.rerun()
+        st.markdown(f"<div style='font-size:14px;'>Projets affichés : <b>{len(projects)}</b></div>",
+                    unsafe_allow_html=True)
 
         st.subheader("Tâches du projet")
-        proj_map = {project_label(p): p["id"] for p in projects}
-        sel = st.selectbox("Projet", ["Aucun"] + list(proj_map.keys()), index=0)
-        if sel != "Aucun":
-            tid = proj_map[sel]
+        if GLOBAL_PROJECT_ID is not None and projects:
+            # Filtre projet global actif : on affiche directement ses tâches
+            tid = projects[0]["id"]
             tlist = sorted([t for t in tasks if t["project_id"][0] == tid],
                            key=lambda x: x["date_deadline"])
             if tlist:
@@ -834,16 +842,44 @@ def main():
             else:
                 st.info("Aucune tâche pour ce projet.")
         else:
-            st.info("Sélectionne un projet.")
+            proj_map = {project_label(p): p["id"] for p in projects}
+            sel = st.selectbox("Projet", ["Aucun"] + list(proj_map.keys()), index=0)
+            if sel != "Aucun":
+                tid = proj_map[sel]
+                tlist = sorted([t for t in tasks if t["project_id"][0] == tid],
+                               key=lambda x: x["date_deadline"])
+                if tlist:
+                    for t in tlist:
+                        wd      = t["date_deadline"].weekday()
+                        we_flag = " **[WE]**" if wd >= 5 else ""
+                        done    = " (Terminé)" if t.get("is_done") else ""
+                        st.write(f"- **{t['name']}**{done}{we_flag} — {t['date_deadline'].strftime('%d-%m-%Y')}")
+                else:
+                    st.info("Aucune tâche pour ce projet.")
+            else:
+                st.info("Sélectionne un projet.")
 
     # ── ONGLET 2 : PURCHASES ─────────────────────────────────────
     with tab2:
         st.markdown("### Purchases par projet")
         projects_all = load_projects(uid, models, fm)
+
+        # Filtre projet global : isoler ce projet uniquement (s'il fait partie
+        # des projets actifs ; sinon on respecte le filtre habituel).
+        if GLOBAL_PROJECT_ID is not None:
+            projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
+
         po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
 
         purchase_data = {p['id']: get_purchase_for_project(p, po_lines, policy_map, buyer_map, po_name_map)
                          for p in projects_all}
+
+        # Tri : projets avec items en retard en premier (grey = commandés mais
+        # non reçus avec date passée ; orange = partiellement reçus).
+        def _late_count(pid):
+            sm, _ = purchase_data[pid]
+            return sm["grey"] + sm["orange"]
+        projects_all = sorted(projects_all, key=lambda p: -_late_count(p["id"]))
 
         for i in range(0, len(projects_all), 6):
             cols = st.columns(6)
@@ -851,13 +887,16 @@ def main():
                 with col:
                     sm, _ = purchase_data[p['id']]
                     tot   = max(sm["total"], 1)
+                    late  = sm["grey"] + sm["orange"]
                     tc    = "red" if sm["grey"] > 0 else "#FFA000" if sm["orange"] > 0 else "white"
+                    # Bordure rouge sur les cartes ayant des items en retard
+                    border = "2px solid #e53935" if late > 0 else "1px solid #444"
                     if st.button(f"{p['company']}\n {short_desc(clean_description_from_display_name(p['display_name']), 25)}",
                                  key=f"proj_btn_{p['id']}"):
                         st.session_state["selected_purchase_project_id"] = p['id']
                     st.markdown(f"""
                         <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
-                            display:flex;margin-top:4px;border:1px solid #444;">
+                            display:flex;margin-top:4px;border:{border};">
                             <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
                             <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
                             <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
@@ -870,7 +909,13 @@ def main():
 
         st.markdown("---")
         st.subheader("Détail lignes d'achat")
-        sel_id = st.session_state.get("selected_purchase_project_id")
+
+        # Si filtre projet global actif → afficher d'office le détail de ce projet
+        if GLOBAL_PROJECT_ID is not None and projects_all:
+            sel_id = projects_all[0]["id"]
+        else:
+            sel_id = st.session_state.get("selected_purchase_project_id")
+
         if sel_id is None:
             st.info("Clique sur une vignette pour voir le détail.")
         else:
@@ -900,7 +945,6 @@ def main():
 
     # ── ONGLET 3 : ANALYTIQUE ────────────────────────────────────
     with tab3:
-        year_now = date.today().year
         st.markdown("### Bilan analytique")
 
         projects_ana = load_projects_with_closed(uid, models, fm)
@@ -916,30 +960,47 @@ def main():
             st.info("Aucune donnée disponible.")
             return
 
+        # ── Statistiques générales : projets NON clôturés (en cours) ──
         actifs = [p for p in projects_ana
                   if not p.get("is_closed") and analytics.get(p["id"])
-                  and analytics[p["id"]]["ca_annee"] > 0]
+                  and analytics[p["id"]]["ca_total"] > 0]
 
-        s_ca  = sum(analytics[p["id"]]["ca_annee"]        for p in actifs)
-        s_dep = sum(analytics[p["id"]]["depenses_annee"]   for p in actifs)
-        s_ma  = sum(analytics[p["id"]]["marge_attendue"]   for p in actifs)
-        s_fac = sum(analytics[p["id"]]["a_facturer_annee"] for p in actifs)
+        s_ca_total  = sum(analytics[p["id"]]["ca_total"]   for p in actifs)
+        s_a_fac     = sum(analytics[p["id"]]["a_facturer"] for p in actifs)
+        ratio_fac   = (s_a_fac / s_ca_total * 100) if s_ca_total > 0 else 0.0
 
-        st.markdown(f"<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
-                    f"Statistiques générales</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
+                    "Statistiques générales (projets en cours, tous millésimes)</div>",
+                    unsafe_allow_html=True)
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric(f"Sales {year_now}", fmt_eur(s_ca))
-        m2.metric(f"Achats+Timesheets {year_now}", fmt_eur(s_dep))
-        m3.metric("Marge restimée (clôturés)", f"{marge_pond:.1f} %",
-                  help="Somme bénéfices / Somme CA, projets clôturés")
-        m4.metric("À facturer (année)", fmt_eur(s_fac))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Ventes en cours", fmt_eur(s_ca_total),
+                  help="CA total des projets non clôturés")
+        m2.metric("À facturer en cours", fmt_eur(s_a_fac),
+                  help="Somme à facturer des projets non clôturés")
+        m3.metric("Ratio À facturer / CA", f"{ratio_fac:.1f} %",
+                  help="À facturer / CA total, projets non clôturés")
 
         st.markdown("---")
-        st.markdown("#### Détail par projet")
+
+        # ── Titre + toggle clôturés/en cours sur la même ligne ──
+        _dt1, _dt2 = st.columns([4, 1])
+        with _dt1:
+            st.markdown("#### Détail par projet")
+        with _dt2:
+            show_closed = st.toggle("Projets clôturés", value=False, key="ana_show_closed")
+
+        # Filtre projet global : appliqué uniquement en mode "en cours".
+        # En mode "clôturés", on bypass le filtre global (on montre tous les clôturés).
+        if show_closed:
+            projects_filtered = [p for p in projects_ana if p.get("is_closed")]
+        else:
+            projects_filtered = [p for p in projects_ana if not p.get("is_closed")]
+            if GLOBAL_PROJECT_ID is not None:
+                projects_filtered = [p for p in projects_filtered if p["id"] == GLOBAL_PROJECT_ID]
 
         rows = []
-        for p in projects_ana:
+        for p in projects_filtered:
             a = analytics.get(p["id"])
             if a is None:
                 continue
@@ -951,7 +1012,6 @@ def main():
                 "Dépenses":   a["depenses_all"],
                 "Facturé":    a["facture_all"],
                 "A_fac":      a["a_facturer"],
-                "Marge_EUR":  a["marge_c"],
                 "Marge_PCT":  a["marge_pct"],
             })
 
@@ -965,7 +1025,11 @@ def main():
                 df_ana = df_ana[df_ana["Projet"].str.lower().str.contains(s)
                                 | df_ana["Client"].str.lower().str.contains(s)]
 
-            cd = "2fr 1.5fr 100px 110px 100px 110px 100px 80px"
+            # Tri par marge croissante (les marges les plus faibles en haut)
+            df_ana = df_ana.sort_values("Marge_PCT", ascending=True)
+
+            # Colonnes (sans Marge EUR)
+            cd = "2fr 1.5fr 100px 110px 100px 110px 80px"
             hdr = f"""<div style="display:grid;grid-template-columns:{cd};column-gap:10px;
                 padding:6px 12px;font-weight:bold;font-size:12px;color:#aaa;
                 border-bottom:2px solid #555;position:sticky;top:0;background:#0e1117;z-index:10;">
@@ -974,7 +1038,6 @@ def main():
                 <div style="text-align:right;">Dépenses</div>
                 <div style="text-align:right;">Facturé</div>
                 <div style="text-align:right;">À facturer</div>
-                <div style="text-align:right;">Marge EUR</div>
                 <div style="text-align:right;">Marge %</div>
             </div>"""
 
@@ -983,7 +1046,7 @@ def main():
                 cl   = row["_closed"]
                 bg   = "#0d2a4a" if cl else "rgba(255,255,255,0.03)"
                 bdr  = "1px solid #1a4a7a" if cl else "1px solid #2a2a2a"
-                mc   = "#e53935" if row["Marge_EUR"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
+                mc   = "#e53935" if row["Marge_PCT"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
                 afc  = "#e53935" if row["A_fac"] < 0 else "#00ACC1"
                 bdg  = (" <span style='font-size:9px;background:#1565C0;color:white;"
                         "padding:1px 4px;border-radius:3px;'>Clôturé</span>" if cl else "")
@@ -1002,39 +1065,12 @@ def main():
                     <div style="text-align:right;">{fe(row['Dépenses'])}</div>
                     <div style="text-align:right;">{fe(row['Facturé'])}</div>
                     <div style="text-align:right;color:{afc};font-weight:600;">{fe(row['A_fac'])}</div>
-                    <div style="text-align:right;color:{mc};font-weight:600;">{fe(row['Marge_EUR'])}</div>
                     <div style="text-align:right;color:{mc};">{fp(row['Marge_PCT'])}</div>
                 </div>"""
 
             st.markdown(f"""<div style="border:1px solid #333;border-radius:6px;overflow:hidden;
                 max-height:420px;overflow-y:auto;background:#0e1117;">
                 {hdr}<div>{body}</div></div>""", unsafe_allow_html=True)
-
-            st.markdown("---")
-            st.markdown("#### Évolution CA facturé & Dépenses — 12 derniers mois")
-
-            if df_monthly.empty:
-                st.info("Pas de données mensuelles.")
-            else:
-                dm = df_monthly.copy()
-                dm["Mois_label"] = pd.to_datetime(dm["Mois"]).dt.strftime("%b %Y")
-                dep_col = "Dépenses" if "Dépenses" in dm.columns else "Depenses"
-
-                df_p = pd.concat([
-                    dm[["Mois_label", "CA"]].rename(columns={"CA": "M"}).assign(S="CA facturé"),
-                    dm[["Mois_label", dep_col]].rename(columns={dep_col: "M"}).assign(S="Dépenses"),
-                ])
-                fig2 = px.bar(df_p, x="Mois_label", y="M", color="S", barmode="group",
-                              color_discrete_map={"CA facturé": "#43a047", "Dépenses": "#e53935"},
-                              height=380, labels={"Mois_label": "", "M": "EUR"})
-                fig2.update_layout(margin=dict(l=10, r=10, t=20, b=20),
-                                   plot_bgcolor="rgba(0,0,0,0)",
-                                   xaxis=dict(tickfont=dict(size=11), showgrid=False),
-                                   yaxis=dict(tickfont=dict(size=11), showgrid=True,
-                                              gridcolor="rgba(180,180,180,0.12)", tickformat=",.0f"),
-                                   legend=dict(orientation="h", y=1.05, x=0),
-                                   bargap=0.2, bargroupgap=0.05)
-                st.plotly_chart(fig2, use_container_width=True, config={"displaylogo": False})
 
     # ── FOOTER ──
     st.markdown("""
