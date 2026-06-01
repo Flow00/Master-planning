@@ -746,8 +746,8 @@ def main():
         _pids_visibles = {p["id"] for p in projects}
         tasks = [t for t in all_tasks if t["project_id"][0] in _pids_visibles]
 
-        # Titre Gantt + slider mois à droite (le toggle "Par étape" est masqué)
-        _gt1, _gt2 = st.columns([4, 1])
+        # Titre Gantt + slider mois + toggle "Par étape" sur la même ligne
+        _gt1, _gt2, _gt3 = st.columns([4, 1, 1])
         with _gt1:
             st.subheader("Gantt")
         with _gt2:
@@ -756,8 +756,8 @@ def main():
             if new_months != st.session_state["months"]:
                 st.session_state["months"] = new_months
                 st.rerun()
-        # Toggle "Par étape" masqué — on conserve juste la variable à False.
-        _sort_by_stage = False
+        with _gt3:
+            _sort_by_stage = st.toggle("Par étape", value=False, key="gantt_sort_stage")
 
         today      = date.today()
         start_view = today
@@ -821,19 +821,35 @@ def main():
                 df_gantt["_empty"] = False
             df_gantt["_empty"] = df_gantt["_empty"].fillna(False).astype(bool)
 
-            # Date de fin du projet (depuis projects), pour le tri Gantt
-            _label_to_date_end = {_id_to_display[p["id"]]: p.get("date_end") for p in projects}
-            df_gantt["date_end_proj"] = pd.to_datetime(
-                df_gantt["Projet"].map(_label_to_date_end), errors="coerce")
-
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
-            # Tri : date de fin croissante (les dates lointaines en haut, axe inversé).
-            # Les projets sans date_end (oranges) restent tout en bas (na_position='first').
-            df_gantt = df_gantt.sort_values(
-                ["date_end_proj", "code"],
-                ascending=[True, True],
-                na_position="first",
-            )
+
+            # Étape Odoo de chaque projet, pour le tri "Par étape" et les bandes alternées
+            _label_to_stage = {_id_to_display[p["id"]]: p.get("stage", "—") for p in projects}
+            df_gantt["stage"] = df_gantt["Projet"].map(_label_to_stage).fillna("—")
+
+            if _sort_by_stage:
+                # Tri par étape : facture finale en HAUT (étape la plus avancée),
+                # puis ..., kick-off, puis projets SANS rang tout en BAS.
+                # L'axe Y est inversé : 1re ligne triée = en bas → tri ascendant
+                # avec inconnus (rang -1) avant tout connu (rang 0..N).
+                _UNKNOWN = len(STAGE_ORDER)
+                def _rank_for_sort(stage_name):
+                    r = _stage_rank(stage_name)
+                    return -1 if r >= _UNKNOWN else r
+                df_gantt["stage_rank"] = df_gantt["stage"].apply(_rank_for_sort)
+                df_gantt = df_gantt.sort_values(["stage_rank", "code"])
+            else:
+                # Tri par date de fin croissante (dates lointaines en haut, axe inversé).
+                # Projets sans date_end (oranges) restent tout en bas.
+                df_gantt["date_end_proj"] = pd.to_datetime(
+                    df_gantt["Projet"].map(
+                        {_id_to_display[p["id"]]: p.get("date_end") for p in projects}
+                    ), errors="coerce")
+                df_gantt = df_gantt.sort_values(
+                    ["date_end_proj", "code"],
+                    ascending=[True, True],
+                    na_position="first",
+                )
             df_gantt["Projet_display"] = df_gantt["Projet"]
 
             df_gantt["Légende"] = df_gantt.apply(
@@ -896,6 +912,25 @@ def main():
                     fig.add_vline(x=sat, line_width=1, line_dash="dot",
                                   line_color="rgba(160,160,160,0.20)")
                 cur_day += timedelta(days=7)
+
+            # Bandes de fond alternées par étape (uniquement en mode "Par étape")
+            if _sort_by_stage:
+                cat_order = list(reversed(df_gantt["Projet_display"].unique().tolist()))
+                proj_to_stage = dict(zip(df_gantt["Projet_display"], df_gantt["stage"]))
+                blocks = []  # (stage, i_start, i_end)
+                for idx, cat in enumerate(cat_order):
+                    stg = proj_to_stage.get(cat, "—")
+                    if blocks and blocks[-1][0] == stg:
+                        blocks[-1] = (stg, blocks[-1][1], idx)
+                    else:
+                        blocks.append((stg, idx, idx))
+                for band_i, (stg, i0, i1) in enumerate(blocks):
+                    if band_i % 2 == 1:
+                        fig.add_hrect(
+                            y0=i0 - 0.5, y1=i1 + 0.5,
+                            fillcolor="rgba(255,255,255,0.06)",
+                            layer="below", line_width=0,
+                        )
 
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         else:
