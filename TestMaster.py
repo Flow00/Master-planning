@@ -895,12 +895,33 @@ def main():
         if GLOBAL_PROJECT_ID is not None:
             projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
 
-        # Tri : projets avec items en retard en premier (grey = commandés mais
-        # non reçus avec date passée ; orange = partiellement reçus).
-        def _late_count(pid):
-            sm, _ = purchase_data[pid]
-            return sm["grey"] + sm["orange"]
-        projects_all = sorted(projects_all, key=lambda p: -_late_count(p["id"]))
+        # Tri : rouges (grey>0) d'abord, oranges (orange>0 sans grey) ensuite,
+        # puis les autres.
+        def _sort_key(p):
+            sm, _ = purchase_data[p["id"]]
+            if sm["grey"] > 0:
+                return (0, -sm["grey"] - sm["orange"])
+            if sm["orange"] > 0:
+                return (1, -sm["orange"])
+            return (2, 0)
+        projects_all = sorted(projects_all, key=_sort_key)
+
+        # CSS pour colorer en orange les boutons des vignettes wrappées
+        # avec st.container(key="orange_btn_*"). Streamlit injecte la classe
+        # `.st-key-orange_btn_<id>` autour du container.
+        st.markdown("""
+        <style>
+        [class*="st-key-orange_btn_"] button {
+            background-color: #FFA000 !important;
+            color: white !important;
+            border: 1px solid #FFA000 !important;
+        }
+        [class*="st-key-orange_btn_"] button:hover {
+            background-color: #FF8C00 !important;
+            border-color: #FF8C00 !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
         for i in range(0, len(projects_all), 6):
             cols = st.columns(6)
@@ -908,15 +929,25 @@ def main():
                 with col:
                     sm, _ = purchase_data[p['id']]
                     tot   = max(sm["total"], 1)
-                    late  = sm["grey"] + sm["orange"]
-                    tc    = "red" if sm["grey"] > 0 else "#FFA000" if sm["orange"] > 0 else "white"
-                    # Bouton en rouge (type="primary") si retard ; secondary sinon.
-                    if st.button(
-                        f"{p['company']}\n {short_desc(clean_description_from_display_name(p['display_name']), 25)}",
-                        key=f"proj_btn_{p['id']}",
-                        type="primary" if late > 0 else "secondary",
-                    ):
+                    is_red    = sm["grey"] > 0
+                    is_orange = (not is_red) and sm["orange"] > 0
+                    tc        = "red" if is_red else "#FFA000" if is_orange else "white"
+                    btn_label = (f"{p['company']}\n "
+                                 f"{short_desc(clean_description_from_display_name(p['display_name']), 25)}")
+
+                    if is_orange:
+                        # Wrapper pour appliquer le CSS orange via la classe st-key-*
+                        with st.container(key=f"orange_btn_{p['id']}"):
+                            clicked = st.button(btn_label, key=f"proj_btn_{p['id']}")
+                    else:
+                        clicked = st.button(
+                            btn_label,
+                            key=f"proj_btn_{p['id']}",
+                            type="primary" if is_red else "secondary",
+                        )
+                    if clicked:
                         st.session_state["selected_purchase_project_id"] = p['id']
+
                     st.markdown(f"""
                         <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
                             display:flex;border:1px solid #FFFFFF;margin-top:4px;">
