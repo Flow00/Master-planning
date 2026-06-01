@@ -625,35 +625,36 @@ def main():
             st.session_state["filter_standard"] = fs
             st.rerun()
 
-    # Filtre projet global (s'applique aux 3 onglets)
-    _all_projects = load_projects_with_closed(uid, models, fm)
-    _global_options = sorted(
-        [(p["id"], project_label(p)) for p in _all_projects],
-        key=lambda t: t[1].lower()
-    )
-    _opt_labels = [lbl for _, lbl in _global_options]
-    _label_to_id = {lbl: pid for pid, lbl in _global_options}
+        # Filtre projet global (sous les toggles, même largeur).
+        # Périmètre = projets ACTIFS (non clôturés/non "fait"), même que Gantt/Purchases.
+        _all_projects = load_projects(uid, models, fm)
+        _global_options = sorted(
+            [(p["id"], project_label(p)) for p in _all_projects],
+            key=lambda t: t[1].lower()
+        )
+        _opt_labels = [lbl for _, lbl in _global_options]
+        _label_to_id = {lbl: pid for pid, lbl in _global_options}
 
-    # index courant à partir de session_state
-    _cur_id = st.session_state.get("global_project_filter")
-    _cur_idx = None
-    if _cur_id is not None:
-        for i, (pid, _) in enumerate(_global_options):
-            if pid == _cur_id:
-                _cur_idx = i
-                break
+        _cur_id = st.session_state.get("global_project_filter")
+        _cur_idx = None
+        if _cur_id is not None:
+            for i, (pid, _) in enumerate(_global_options):
+                if pid == _cur_id:
+                    _cur_idx = i
+                    break
 
-    _sel_label = st.selectbox(
-        "Filtre projet (sur les 3 onglets)",
-        options=_opt_labels,
-        index=_cur_idx,
-        placeholder="Tous les projets — cliquer pour filtrer sur un seul",
-        key="global_project_selectbox",
-    )
-    _new_id = _label_to_id.get(_sel_label) if _sel_label else None
-    if _new_id != st.session_state.get("global_project_filter"):
-        st.session_state["global_project_filter"] = _new_id
-        st.rerun()
+        _sel_label = st.selectbox(
+            "Filtre projet",
+            options=_opt_labels,
+            index=_cur_idx,
+            placeholder="Tous",
+            key="global_project_selectbox",
+        )
+        _new_id = _label_to_id.get(_sel_label) if _sel_label else None
+        if _new_id != st.session_state.get("global_project_filter"):
+            st.session_state["global_project_filter"] = _new_id
+            st.rerun()
+
     GLOBAL_PROJECT_ID = st.session_state.get("global_project_filter")
 
     tab1, tab2, tab3 = st.tabs(["Planning", "Purchases", "Analytique"])
@@ -751,11 +752,11 @@ def main():
                 df_gantt["Projet"].map(_label_to_date_end), errors="coerce")
 
             df_gantt["code"]  = df_gantt["Projet"].apply(extract_project_code)
-            # Tri : date de fin descendante (les plus proches en haut, axe inversé).
-            # Les projets sans date_end vont tout en bas (na_position='first' en desc).
+            # Tri : date de fin croissante (les dates lointaines en haut, axe inversé).
+            # Les projets sans date_end (oranges) restent tout en bas (na_position='first').
             df_gantt = df_gantt.sort_values(
                 ["date_end_proj", "code"],
-                ascending=[False, True],
+                ascending=[True, True],
                 na_position="first",
             )
             df_gantt["Projet_display"] = df_gantt["Projet"]
@@ -793,8 +794,9 @@ def main():
                 yaxis=dict(categoryorder="array",
                            categoryarray=list(reversed(df_gantt["Projet_display"].unique().tolist())),
                            tickfont=dict(size=12),
+                           title_text="",
                            showgrid=True, gridcolor="rgba(180,180,180,0.18)"),
-                xaxis=dict(showgrid=False),
+                xaxis=dict(title_text="", showgrid=False),
                 plot_bgcolor="rgba(0,0,0,0)",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
                             xanchor="center", x=0.5, font=dict(size=10))
@@ -842,22 +844,7 @@ def main():
             else:
                 st.info("Aucune tâche pour ce projet.")
         else:
-            proj_map = {project_label(p): p["id"] for p in projects}
-            sel = st.selectbox("Projet", ["Aucun"] + list(proj_map.keys()), index=0)
-            if sel != "Aucun":
-                tid = proj_map[sel]
-                tlist = sorted([t for t in tasks if t["project_id"][0] == tid],
-                               key=lambda x: x["date_deadline"])
-                if tlist:
-                    for t in tlist:
-                        wd      = t["date_deadline"].weekday()
-                        we_flag = " **[WE]**" if wd >= 5 else ""
-                        done    = " (Terminé)" if t.get("is_done") else ""
-                        st.write(f"- **{t['name']}**{done}{we_flag} — {t['date_deadline'].strftime('%d-%m-%Y')}")
-                else:
-                    st.info("Aucune tâche pour ce projet.")
-            else:
-                st.info("Sélectionne un projet.")
+            st.info("Sélectionne un projet dans le filtre en haut à droite pour voir ses tâches.")
 
     # ── ONGLET 2 : PURCHASES ─────────────────────────────────────
     with tab2:
@@ -889,22 +876,26 @@ def main():
                     tot   = max(sm["total"], 1)
                     late  = sm["grey"] + sm["orange"]
                     tc    = "red" if sm["grey"] > 0 else "#FFA000" if sm["orange"] > 0 else "white"
-                    # Bordure rouge sur les cartes ayant des items en retard
-                    border = "2px solid #e53935" if late > 0 else "1px solid #444"
+                    # Cadre extérieur rouge si en retard, transparent sinon.
+                    # Progress bar elle-même garde un contour blanc neutre.
+                    outer_border = "2px solid #e53935" if late > 0 else "1px solid transparent"
                     if st.button(f"{p['company']}\n {short_desc(clean_description_from_display_name(p['display_name']), 25)}",
                                  key=f"proj_btn_{p['id']}"):
                         st.session_state["selected_purchase_project_id"] = p['id']
                     st.markdown(f"""
-                        <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
-                            display:flex;margin-top:4px;border:{border};">
-                            <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
-                            <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
-                            <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
-                            <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
-                            <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
-                        </div>
-                        <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
-                            {sm['green']} / {sm['total']} lignes</div>""",
+                        <div style="border:{outer_border};border-radius:6px;padding:4px;margin-top:-4px;">
+                          <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
+                              display:flex;border:1px solid #FFFFFF;">
+                              <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
+                              <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
+                              <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
+                              <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
+                              <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
+                          </div>
+                          <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
+                              {sm['green']} / {sm['total']} lignes
+                          </div>
+                        </div>""",
                         unsafe_allow_html=True)
 
         st.markdown("---")
