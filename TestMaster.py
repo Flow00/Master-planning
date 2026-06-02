@@ -30,14 +30,25 @@ def _load_credentials():
     PASSWORD = _f.decrypt(_PASSWORD).decode()
 
 
-@st.cache_resource
-def connect_odoo():
+@st.cache_data(ttl=3600)
+def _odoo_uid():
+    """Authentifie sur Odoo et renvoie uid. Mis en cache 1h car auth = round-trip réseau."""
     _load_credentials()
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(DB, USERNAME, PASSWORD, {})
     if not uid:
         raise Exception("Échec authentification Odoo")
-    return uid, xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    return uid
+
+
+def connect_odoo():
+    """Renvoie (uid, models). uid est caché, models est recréé à chaque appel
+    car ServerProxy n'est pas thread-safe et garde un état HTTP interne :
+    le partager entre reruns provoque http.client.CannotSendRequest."""
+    _load_credentials()
+    uid = _odoo_uid()
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    return uid, models
 
 
 def get_top_companies_batch(uid, models, partner_ids):
