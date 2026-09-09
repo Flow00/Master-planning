@@ -133,7 +133,7 @@ def load_projects(_uid, _models, filter_mode="both"):
         domain = base + ['|', ('tag_ids', 'in', eng), ('tag_ids', 'in', std), ('tag_ids', 'in', prol)]
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
-        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
+        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'account_id', 'stage_id', 'date']})
 
     # Filet de sécurité Python : exclure tout stage contenant "annul" ou "cancel"
     # (couvre les libellés exotiques non listés ci-dessus).
@@ -189,7 +189,7 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
         domain = base + ['|', ('tag_ids', 'in', eng), ('tag_ids', 'in', std), ('tag_ids', 'in', prol)]
 
     projects = models.execute_kw(DB, uid, PASSWORD, 'project.project', 'search_read',
-        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'analytic_account_id', 'stage_id', 'date']})
+        [domain], {'fields': ['id', 'display_name', 'partner_id', 'name', 'account_id', 'stage_id', 'date']})
 
     # Filet de sécurité Python : exclure les libellés exotiques "annul"/"cancel".
     def _is_cancelled_stage(p):
