@@ -1,6 +1,7 @@
 import xmlrpc.client
 from datetime import datetime, timedelta, date
 import re
+import unicodedata
 import json
 import html
 from pathlib import Path
@@ -104,6 +105,36 @@ def fmt_eur(val):
     return f"{val:,.0f} EUR".replace(",", " ")
 
 
+# Projets exclus des DEUX modes selon le nom de leur compte analytique.
+# Comparaison sans accents ni majuscules, et "contient" (le nom Odoo peut
+# être préfixé d'un code, ex. "[LIG-DEP] Dépannages (LIG)").
+EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)"]
+
+
+def _norm_txt(s):
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return " ".join(s.lower().split())
+
+
+_EXCLUDED_ACC_NORM = [_norm_txt(a) for a in EXCLUDED_ANALYTIC_ACCOUNTS]
+
+
+def is_excluded_account(account):
+    """account = valeur many2one Odoo [id, nom] (ou False)."""
+    if not account:
+        return False
+    name = _norm_txt(account[1] if isinstance(account, (list, tuple)) else account)
+    return any(ex in name for ex in _EXCLUDED_ACC_NORM)
+
+
+@st.cache_data(ttl=600)
+def excluded_project_ids(_uid, _models):
+    """IDs des projets dont le compte analytique est exclu (pour filtrer les tâches)."""
+    projs = _models.execute_kw(DB, _uid, PASSWORD, "project.project", "search_read",
+        [[("account_id", "!=", False)]], {"fields": ["id", "account_id"]})
+    return {p["id"] for p in projs if is_excluded_account(p.get("account_id"))}
+
+
 # ============================================================
 # LOADERS
 # ============================================================
@@ -140,6 +171,8 @@ def load_projects(_uid, _models, filter_mode="both"):
     # AJOUT : alias account_id -> analytic_account_id pour le reste du script
     for p in projects:
         p['analytic_account_id'] = p.pop('account_id', None)
+    # Exclure les projets sur compte analytique "Dépannages (LIG)" (voir EXCLUDED_ANALYTIC_ACCOUNTS)
+    projects = [p for p in projects if not is_excluded_account(p.get('analytic_account_id'))]
 
     # Filet de sécurité Python : exclure tout stage contenant "annul" ou "cancel"
     # (couvre les libellés exotiques non listés ci-dessus).
@@ -199,6 +232,8 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
      # AJOUT : alias account_id -> analytic_account_id pour le reste du script
     for p in projects:
         p['analytic_account_id'] = p.pop('account_id', None)
+    # Exclure les projets sur compte analytique "Dépannages (LIG)" (voir EXCLUDED_ANALYTIC_ACCOUNTS)
+    projects = [p for p in projects if not is_excluded_account(p.get('analytic_account_id'))]
     # Filet de sécurité Python : exclure les libellés exotiques "annul"/"cancel".
     def _is_cancelled_stage(p):
         name = (p.get("stage_id")[1] if p.get("stage_id") else "") or ""
@@ -803,8 +838,11 @@ def load_week_tasks_for_users(_uid, _models, user_ids, monday):
         [[("user_ids", "in", list(user_ids)),
           ("date_deadline", ">=", monday.strftime("%Y-%m-%d"))]],
         {"fields": fields})
+    excluded = excluded_project_ids(_uid, _models)
     out = []
     for t in tasks:
+        if t.get("project_id") and t["project_id"][0] in excluded:
+            continue
         dl = _to_date(t.get("date_deadline"))
         if not dl:
             continue
