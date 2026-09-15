@@ -105,10 +105,12 @@ def fmt_eur(val):
     return f"{val:,.0f} EUR".replace(",", " ")
 
 
-# Projets exclus des DEUX modes selon le nom de leur compte analytique.
-# Comparaison sans accents ni majuscules, et "contient" (le nom Odoo peut
-# être préfixé d'un code, ex. "[LIG-DEP] Dépannages (LIG)").
+# Projets exclus des DEUX modes selon leur compte analytique.
+# Un compte est exclu si son CODE (champ "Référence" dans Odoo) est dans
+# EXCLUDED_ANALYTIC_CODES, ou si son nom contient un des libellés
+# (comparaison sans accents ni majuscules).
 EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)"]
+EXCLUDED_ANALYTIC_CODES = ["DEP_LIG"]
 
 
 def _norm_txt(s):
@@ -117,10 +119,11 @@ def _norm_txt(s):
 
 
 _EXCLUDED_ACC_NORM = [_norm_txt(a) for a in EXCLUDED_ANALYTIC_ACCOUNTS]
+_EXCLUDED_CODES_NORM = {_norm_txt(c) for c in EXCLUDED_ANALYTIC_CODES}
 
 
 def is_excluded_account(account):
-    """account = valeur many2one Odoo [id, nom] (ou False)."""
+    """account = valeur many2one Odoo [id, nom] (ou False). Test sur le nom seul."""
     if not account:
         return False
     name = _norm_txt(account[1] if isinstance(account, (list, tuple)) else account)
@@ -128,11 +131,48 @@ def is_excluded_account(account):
 
 
 @st.cache_data(ttl=600)
+def excluded_accounts(_uid, _models):
+    """Comptes analytiques exclus trouvés dans Odoo : {id: "[code] nom"}."""
+    accs = _models.execute_kw(DB, _uid, PASSWORD, "account.analytic.account", "search_read",
+        [["|", ("code", "in", EXCLUDED_ANALYTIC_CODES), ("name", "ilike", "annage")]],
+        {"fields": ["id", "name", "code"], "context": {"active_test": False}})
+    out = {}
+    for a in accs:
+        code = a.get("code") or ""
+        if _norm_txt(code) in _EXCLUDED_CODES_NORM or any(ex in _norm_txt(a.get("name")) for ex in _EXCLUDED_ACC_NORM):
+            out[a["id"]] = f"[{code}] {a.get('name')}" if code else str(a.get("name"))
+    return out
+
+
+@st.cache_data(ttl=3600)
+def project_analytic_fields(_uid, _models):
+    """Tous les champs de project.project qui pointent vers un compte analytique
+    (account_id + colonnes de plans analytiques supplémentaires en Odoo 18/19)."""
+    try:
+        f = _models.execute_kw(DB, _uid, PASSWORD, "project.project", "fields_get",
+            [], {"attributes": ["type", "relation"]})
+        fields = sorted(k for k, v in f.items()
+                        if v.get("type") == "many2one" and v.get("relation") == "account.analytic.account")
+        return fields or ["account_id"]
+    except Exception:
+        return ["account_id"]
+
+
+@st.cache_data(ttl=600)
 def excluded_project_ids(_uid, _models):
-    """IDs des projets dont le compte analytique est exclu (pour filtrer les tâches)."""
+    """IDs des projets liés (sur n'importe quel plan analytique) à un compte exclu."""
+    acc_ids = set(excluded_accounts(_uid, _models))
+    fields = project_analytic_fields(_uid, _models)
     projs = _models.execute_kw(DB, _uid, PASSWORD, "project.project", "search_read",
-        [[("account_id", "!=", False)]], {"fields": ["id", "account_id"]})
-    return {p["id"] for p in projs if is_excluded_account(p.get("account_id"))}
+        [[]], {"fields": ["id"] + fields, "context": {"active_test": False}})
+    out = set()
+    for p in projs:
+        for fname in fields:
+            val = p.get(fname)
+            if val and (val[0] in acc_ids or is_excluded_account(val)):
+                out.add(p["id"])
+                break
+    return out
 
 
 # ============================================================
@@ -172,7 +212,8 @@ def load_projects(_uid, _models, filter_mode="both"):
     for p in projects:
         p['analytic_account_id'] = p.pop('account_id', None)
     # Exclure les projets sur compte analytique "Dépannages (LIG)" (voir EXCLUDED_ANALYTIC_ACCOUNTS)
-    projects = [p for p in projects if not is_excluded_account(p.get('analytic_account_id'))]
+    _excl = excluded_project_ids(uid, models)
+    projects = [p for p in projects if p['id'] not in _excl and not is_excluded_account(p.get('analytic_account_id'))]
 
     # Filet de sécurité Python : exclure tout stage contenant "annul" ou "cancel"
     # (couvre les libellés exotiques non listés ci-dessus).
@@ -233,7 +274,8 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
     for p in projects:
         p['analytic_account_id'] = p.pop('account_id', None)
     # Exclure les projets sur compte analytique "Dépannages (LIG)" (voir EXCLUDED_ANALYTIC_ACCOUNTS)
-    projects = [p for p in projects if not is_excluded_account(p.get('analytic_account_id'))]
+    _excl = excluded_project_ids(uid, models)
+    projects = [p for p in projects if p['id'] not in _excl and not is_excluded_account(p.get('analytic_account_id'))]
     # Filet de sécurité Python : exclure les libellés exotiques "annul"/"cancel".
     def _is_cancelled_stage(p):
         name = (p.get("stage_id")[1] if p.get("stage_id") else "") or ""
@@ -927,6 +969,16 @@ def mode2_settings_dialog(uid, models):
     fournisseurs = st.multiselect("Fournisseurs suivis", [i for i, _ in suppliers],
         default=[i for i in resolve_supplier_ids(s, suppliers) if i in sup_names],
         format_func=lambda i: sup_names.get(i, str(i)))
+
+    st.markdown("**Exclusions**")
+    try:
+        _accs = excluded_accounts(uid, models)
+        _n = len(excluded_project_ids(uid, models))
+        st.caption(("Comptes exclus : " + ", ".join(_accs.values()) if _accs
+                    else "⚠ Aucun compte exclu trouvé dans Odoo")
+                   + f" — {_n} projet(s) exclu(s) des deux modes.")
+    except Exception as e:
+        st.caption(f"Exclusions : erreur {e}")
 
     c1, c2 = st.columns(2)
     if c1.button("Enregistrer", type="primary", use_container_width=True):
