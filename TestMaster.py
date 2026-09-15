@@ -1024,7 +1024,7 @@ def load_workshop_projects(uid, models, monday, weeks):
     for t in all_tasks:
         if classify_task_type(t["name"]) not in WORKSHOP_TYPES:
             continue
-        if t["date_deadline"] < monday or t["date_start"] > end:
+        if t["date_deadline"] < monday or t["date_start"] >= end:   # fin de fenêtre exclue
             continue
         pid = t["project_id"][0]
         first_ws[pid] = min(first_ws.get(pid, t["date_start"]), t["date_start"])
@@ -1174,16 +1174,16 @@ MODE2_CSS = """<style>
 .m2-title span{font-weight:400;color:#999;font-size:13px;margin-left:8px;}
 .wp{font-size:12px;}
 .wp-grid{display:grid;row-gap:3px;}
-.wp-head{position:sticky;top:0;background:#0e1117;z-index:3;padding:2px 0 4px;border-bottom:1px solid #444;}
+.wp-head{position:sticky;top:0;background:#0e1117;z-index:3;padding:2px 0 4px;border-bottom:2px solid #777;}
 .wp-day{text-align:center;color:#aaa;font-weight:600;}
 .wp-day.wp-today{color:#fff;background:rgba(255,255,255,.10);border-radius:4px;}
 .wp-group{margin:8px 0 2px;font-weight:700;letter-spacing:.08em;color:#8ab4f8;font-size:11px;
-  text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:2px;}
-.wp-user{border-bottom:1px solid #222;padding:2px 0;}
+  text-transform:uppercase;border-bottom:1px solid #666;padding-bottom:2px;}
+.wp-user{border-bottom:1px solid #4a4a4a;padding:0;row-gap:0;}
 .wp-name{align-self:center;color:#fff;font-size:15px;font-weight:700;padding-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.wp-cell{border-left:1px dashed rgba(255,255,255,.10);min-height:24px;}
-.wp-cell.wp-today{background:rgba(255,255,255,.05);}
-.wp-task{margin:0 2px;border-radius:4px;padding:3px 6px;overflow:hidden;z-index:1;line-height:1.25;align-self:center;}
+.wp-cell{border-left:1px solid rgba(255,255,255,.28);min-height:24px;}
+.wp-cell.wp-today{background:rgba(255,255,255,.07);}
+.wp-task{margin:2px 3px;border-radius:4px;padding:3px 6px;overflow:hidden;z-index:1;line-height:1.25;align-self:center;}
 .wp-t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .wp-d{font-size:10.5px;opacity:.85;white-space:nowrap;}
 .wp-empty{color:#777;font-style:italic;padding:4px 0;}
@@ -1314,9 +1314,13 @@ def render_zone_planning_semaine(uid, models, settings):
 def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, weeks):
     ct, cs = st.columns([4, 1])
     with ct:
-        st.markdown(f"<div class='m2-title'>Gantt atelier — Engineering"
-                    f"<span>{len(projects)} projets · {weeks} semaines</span></div>",
-                    unsafe_allow_html=True)
+        title_ph = st.empty()
+
+    def _title(n):
+        title_ph.markdown(f"<div class='m2-title'>Gantt atelier — Engineering"
+                          f"<span>{n} projets · {weeks} semaines</span></div>",
+                          unsafe_allow_html=True)
+    _title(len(projects))
     with cs:
         new_weeks = st.slider("Semaines", 2, 8, value=weeks, key="m2_gantt_weeks",
                               label_visibility="collapsed")
@@ -1342,7 +1346,7 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
 
     rows = []
     for t in tasks:
-        if t["date_deadline"] < monday or t["date_start"] > end:
+        if t["date_deadline"] < monday or t["date_start"] >= end:   # fin de fenêtre exclue
             continue
         ttype = classify_task_type(t["name"])
         rows.append({
@@ -1377,6 +1381,10 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
     df = pd.DataFrame(rows).drop(columns=["_start", "_end", "_order"])
     df["Début"] = pd.to_datetime(df["Début"])
     df["Fin"] = pd.to_datetime(df["Fin"])
+    # Lignes réellement présentes (le compteur et la hauteur suivent ce qui est affiché)
+    shown = set(df["Projet"])
+    order = [o for o in order if o in shown]
+    _title(len(order))
     full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
     fig = px.timeline(df, x_start="Début", x_end="Fin", y="Projet", color="Légende",
                       color_discrete_map=full_color_map, hover_name="Tâche",
@@ -1496,21 +1504,34 @@ _MODE2_FIT_JS = """
   const KEYS = ["m2_top", "m2_bottom", "m2_side"];
   const MIN = %(min)s;
 
-  // Hauteur d'écran transmise à Python (?vh=...) pour dimensionner le Gantt au pixel
-  // près (rendu net, sans mise à l'échelle). Rechargement unique si elle change.
-  let lastVh = null, stableTicks = 0;
-  function checkVh() {
-    const vh = P.innerHeight;
-    stableTicks = (vh === lastVh) ? stableTicks + 1 : 0;
-    lastVh = vh;
-    if (stableTicks < 2) return;                 // attendre que la taille soit stable
+  // Hauteur du Gantt : mesurée dans la page (place réellement disponible dans le cadre)
+  // puis transmise à Python (?gh=... + cookie m2gh) pour un rendu net au pixel près.
+  // Rechargement uniquement si l'écart est notable, et au plus 3 fois / 10 min.
+  let lastTarget = null, stableTicks = 0;
+  function checkGantt() {
+    const box = doc.querySelector(".st-key-m2_bottom");
+    const inner = doc.querySelector(".st-key-m2_bottom_fit");
+    const chart = inner && inner.querySelector('[data-testid="stPlotlyChart"]');
+    if (!box || !chart) return;
+    const cs = P.getComputedStyle(box);
+    const avail = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const other = inner.offsetHeight - chart.offsetHeight;   // titre, curseur, espaces
+    const target = Math.max(160, Math.floor(avail - other - 6));
+    stableTicks = (target === lastTarget) ? stableTicks + 1 : 0;
+    lastTarget = target;
+    if (stableTicks < 2 || Math.abs(chart.offsetHeight - target) <= 12) return;
+    let tries = [];
+    try { tries = JSON.parse(P.sessionStorage.getItem("m2gh_tries") || "[]"); } catch (e) {}
+    const now = Date.now();
+    tries = tries.filter(t => now - t < 600000);
+    if (tries.length >= 3) return;
+    tries.push(now);
+    try { P.sessionStorage.setItem("m2gh_tries", JSON.stringify(tries)); } catch (e) {}
+    doc.cookie = "m2gh=" + target + "; path=/; max-age=31536000; SameSite=Lax";
     const url = new URL(P.location.href);
-    const cur = parseInt(url.searchParams.get("vh") || "0", 10);
-    if (Math.abs(cur - vh) > 30) {
-      url.searchParams.set("vh", vh);
-      // exécuté dans le contexte de la page (l'iframe sandboxée ne peut pas naviguer elle-même)
-      P.setTimeout("window.location.replace(" + JSON.stringify(url.toString()) + ")", 0);
-    }
+    url.searchParams.set("gh", target);
+    // exécuté dans le contexte de la page (l'iframe sandboxée ne peut pas naviguer elle-même)
+    P.setTimeout("window.location.replace(" + JSON.stringify(url.toString()) + ")", 0);
   }
 
   function fit() {
@@ -1533,25 +1554,28 @@ _MODE2_FIT_JS = """
     }
   }
   fit();
-  setInterval(function () { fit(); checkVh(); }, 600);
+  setInterval(function () { fit(); checkGantt(); }, 600);
 })();
 </script>
 """
 
 
 def mode2_gantt_height(n_rows):
-    """Hauteur du graphique Gantt (px) pour remplir le cadre du bas sans déborder,
-    à partir de la hauteur d'écran transmise par le navigateur (?vh=)."""
+    """Hauteur du graphique Gantt (px) mesurée par le navigateur pour remplir le cadre
+    du bas (?gh=... dans l'adresse, ou cookie m2gh). Sinon, calcul par défaut."""
+    raw = st.query_params.get("gh")
+    if not raw:
+        try:
+            raw = st.context.cookies.get("m2gh")
+        except Exception:
+            raw = None
     try:
-        vh = int(st.query_params.get("vh", "0"))
+        gh = int(raw or 0)
     except ValueError:
-        vh = 0
-    if vh < 300:
-        return max(260, n_rows * 24 + 70)          # pas encore connue : ancien calcul
-    r_top = max(0.2, min(0.8, MODE2_TOP_RATIO))
-    col = vh - MODE2_OFFSET_PX - 16
-    frame = col * (1 - r_top) - 26                  # padding 12+12 + bordures
-    return max(160, int(frame - 72))                # 72 ≈ titre + curseur + espace
+        gh = 0
+    if 160 <= gh <= 4000:
+        return gh
+    return max(260, n_rows * 24 + 70)
 
 
 def render_mode2_layout(uid, models):
