@@ -396,7 +396,18 @@ def load_purchase_data_all_projects():
     return po_lines, policy_map, buyer_map, po_name_map
 
 
-def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map):
+def dist_account_ids(dist):
+    """IDs de comptes présents dans une analytic_distribution (clés "12" ou "12,34")."""
+    ids = set()
+    for key in (dist or {}):
+        for part in str(key).split(","):
+            if part.strip().isdigit():
+                ids.add(int(part))
+    return ids
+
+
+def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_map,
+                             excluded_acc_ids=frozenset()):
     today = date.today()
     counts = {"orange": 0, "grey": 0, "white": 0, "green": 0, "blue": 0}
     formatted = []
@@ -409,6 +420,9 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     for l in po_lines:
         dist = l.get("analytic_distribution") or {}
         if str(analytic_id) not in dist or l["product_qty"] == 0:
+            continue
+        # Ligne aussi imputée à un compte exclu (ex. Dépannages (LIG)) → ignorée
+        if excluded_acc_ids and dist_account_ids(dist) & excluded_acc_ids:
             continue
 
         qty_o = l["product_qty"]
@@ -452,7 +466,9 @@ def compute_all_purchase_data(_uid, _models, filter_mode):
     uid, models = _uid, _models
     projects = load_projects(uid, models, filter_mode)
     po_lines, policy_map, buyer_map, po_name_map = load_purchase_data_all_projects()
-    purchase_data = {p["id"]: get_purchase_for_project(p, po_lines, policy_map, buyer_map, po_name_map)
+    excl_acc = frozenset(excluded_accounts(uid, models))
+    purchase_data = {p["id"]: get_purchase_for_project(p, po_lines, policy_map, buyer_map, po_name_map,
+                                                       excl_acc)
                      for p in projects}
     return purchase_data, projects
 
@@ -1252,8 +1268,13 @@ def render_zone_receptions(uid, models, settings, projects):
     aid_to_proj = {p["analytic_account_id"][0]: p for p in projects if p.get("analytic_account_id")}
     lines = load_incoming_po_lines(uid, models, sup_ids)
 
+    excl_acc = set(excluded_accounts(uid, models))
+
     groups = {}   # (date, fournisseur, PO, projet) -> [descriptions]
     for l in lines:
+        # Ligne imputée (sur n'importe quel plan) à un compte exclu, ex. Dépannages (LIG) → ignorée
+        if dist_account_ids(l.get("analytic_distribution")) & excl_acc:
+            continue
         proj = None
         for key in (l.get("analytic_distribution") or {}):
             for part in str(key).split(","):          # clés "12,34" possibles (Odoo 17+)
