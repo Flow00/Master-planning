@@ -1396,19 +1396,23 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
             trace.name = trace.name.replace("__done", "")
 
     fig_h = mode2_gantt_height(len(order))
-    row_px = (fig_h - 70) / max(1, len(order))
-    # Noms de projets : jusqu'à 15 px, réduits seulement si les lignes sont très serrées
-    tick_size = max(9, min(15, int(row_px * 0.85)))
+    # zone de tracé ≈ hauteur - légende/marge haute (≈35) - dates en bas sur 2 lignes (≈45)
+    row_px = (fig_h - 60) / max(1, len(order))
+    # Noms de projets : jusqu'à 15 px, réduits si les lignes sont serrées (sinon Plotly
+    # en masque un sur deux quand ils se chevauchent)
+    tick_size = max(7, min(15, int(row_px * 0.8)))
     fig.update_layout(
         barmode="overlay", height=fig_h,
-        margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=4, b=22, pad=2), plot_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(categoryorder="array", categoryarray=list(reversed(order)),
+                   tickmode="array", tickvals=order, ticktext=order,   # force TOUS les noms
                    title_text="", tickfont=dict(size=tick_size, color="#ffffff"), fixedrange=True,
                    showgrid=True, gridcolor="rgba(180,180,180,0.15)"),
         # fixedrange : pas de zoom/déplacement accidentel (écran TV)
         xaxis=dict(title_text="", showgrid=False, range=[monday, end], fixedrange=True,
                    dtick=7 * 24 * 3600 * 1000, tick0=monday.strftime("%Y-%m-%d"),
-                   tickformat="S%V<br>%d/%m"),
+                   tickformat="S%V · %d/%m", tickfont=dict(size=11),
+                   automargin=False),   # sinon Plotly réserve ~50 px vides sous les dates
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5,
                     font=dict(size=10), title_text=""),
     )
@@ -1505,14 +1509,15 @@ _MODE2_FIT_JS = """
   const MIN = %(min)s;
 
   // Hauteur du Gantt : mesurée dans la page (place réellement disponible dans le cadre)
-  // puis transmise à Python (?gh=... + cookie m2gh) pour un rendu net au pixel près.
-  // Rechargement uniquement si l'écart est notable, et au plus 3 fois / 10 min.
+  // puis envoyée à Python via un champ caché (st.text_input "m2_gh") → nouveau rendu
+  // net au pixel près, sans recharger la page.
   let lastTarget = null, stableTicks = 0;
   function checkGantt() {
     const box = doc.querySelector(".st-key-m2_bottom");
     const inner = doc.querySelector(".st-key-m2_bottom_fit");
     const chart = inner && inner.querySelector('[data-testid="stPlotlyChart"]');
-    if (!box || !chart) return;
+    const input = doc.querySelector(".st-key-m2_gh input");
+    if (!box || !chart || !input) return;
     const cs = P.getComputedStyle(box);
     const avail = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
     const other = inner.offsetHeight - chart.offsetHeight;   // titre, curseur, espaces
@@ -1520,18 +1525,12 @@ _MODE2_FIT_JS = """
     stableTicks = (target === lastTarget) ? stableTicks + 1 : 0;
     lastTarget = target;
     if (stableTicks < 2 || Math.abs(chart.offsetHeight - target) <= 12) return;
-    let tries = [];
-    try { tries = JSON.parse(P.sessionStorage.getItem("m2gh_tries") || "[]"); } catch (e) {}
-    const now = Date.now();
-    tries = tries.filter(t => now - t < 600000);
-    if (tries.length >= 3) return;
-    tries.push(now);
-    try { P.sessionStorage.setItem("m2gh_tries", JSON.stringify(tries)); } catch (e) {}
-    doc.cookie = "m2gh=" + target + "; path=/; max-age=31536000; SameSite=Lax";
-    const url = new URL(P.location.href);
-    url.searchParams.set("gh", target);
-    // exécuté dans le contexte de la page (l'iframe sandboxée ne peut pas naviguer elle-même)
-    P.setTimeout("window.location.replace(" + JSON.stringify(url.toString()) + ")", 0);
+    if (input.value === String(target)) return;               // déjà envoyé
+    const setter = Object.getOwnPropertyDescriptor(P.HTMLInputElement.prototype, "value").set;
+    setter.call(input, String(target));
+    input.dispatchEvent(new P.Event("input", {bubbles: true}));
+    input.dispatchEvent(new P.KeyboardEvent("keydown",
+      {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}));
   }
 
   function fit() {
@@ -1562,16 +1561,10 @@ _MODE2_FIT_JS = """
 
 def mode2_gantt_height(n_rows):
     """Hauteur du graphique Gantt (px) mesurée par le navigateur pour remplir le cadre
-    du bas (?gh=... dans l'adresse, ou cookie m2gh). Sinon, calcul par défaut."""
-    raw = st.query_params.get("gh")
-    if not raw:
-        try:
-            raw = st.context.cookies.get("m2gh")
-        except Exception:
-            raw = None
+    du bas (champ caché "m2_gh" rempli par le JS). Sinon, calcul par défaut."""
     try:
-        gh = int(raw or 0)
-    except ValueError:
+        gh = int(st.session_state.get("m2_gh") or 0)
+    except (TypeError, ValueError):
         gh = 0
     if 160 <= gh <= 4000:
         return gh
@@ -1601,13 +1594,17 @@ def render_mode2_layout(uid, models):
     .st-key-m2_top_fit, .st-key-m2_bottom_fit, .st-key-m2_side_fit {{
         flex: 0 0 auto !important; min-height: auto !important;
     }}
-    [data-testid="stLayoutWrapper"]:has(> .st-key-m2_fit_js), .st-key-m2_fit_js {{
-        position: absolute !important; height: 0 !important; width: 0 !important; overflow: hidden;
+    [data-testid="stLayoutWrapper"]:has(> .st-key-m2_fit_js), .st-key-m2_fit_js,
+    .stElementContainer:has(.st-key-m2_gh), .element-container:has(.st-key-m2_gh), .st-key-m2_gh {{
+        position: absolute !important; height: 0 !important; width: 0 !important;
+        overflow: hidden; opacity: 0; pointer-events: none;
     }}
     </style>""", unsafe_allow_html=True)
     st.markdown(MODE2_CSS, unsafe_allow_html=True)
     with st.container(key="m2_fit_js"):
         components.html(_MODE2_FIT_JS % {"min": MODE2_FIT_MIN_SCALE}, height=0)
+        # Champ caché : hauteur du Gantt mesurée par le navigateur (voir checkGantt)
+        st.text_input("gh", key="m2_gh", label_visibility="collapsed")
 
     settings = load_mode2_settings()
     today = date.today()
