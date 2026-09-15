@@ -110,8 +110,8 @@ def fmt_eur(val):
 # (sans tenir compte des accents, majuscules, ni du singulier/pluriel
 # "Dépannage"/"Dépannages"), ou si son CODE (champ "Référence") est listé.
 # ⚠ Correspondance EXACTE : "Dépannages (LIG) + stock" n'est PAS exclu.
-EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)", "Dépannages (Liège)"]
-EXCLUDED_ANALYTIC_CODES = ["DEP_LIG"]
+EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)", "Dépannages (Liège)", "Vente pure (LIG)"]
+EXCLUDED_ANALYTIC_CODES = ["DEP_LIG", "VP_LIG"]
 
 
 def _norm_txt(s):
@@ -142,8 +142,18 @@ def is_excluded_account(account):
 @st.cache_data(ttl=600)
 def excluded_accounts(_uid, _models):
     """Comptes analytiques exclus trouvés dans Odoo : {id: "[code] nom"}."""
+    # Pré-filtre Odoo large (codes + un mot-clé sans accent par libellé),
+    # la correspondance exacte est faite ensuite en Python.
+    hints = set()
+    for label in EXCLUDED_ANALYTIC_ACCOUNTS:
+        words = re.findall(r"[A-Za-z]{4,}", label)
+        if words:
+            w = max(words, key=len)
+            hints.add(w[:-1] if len(w) > 5 and w.endswith("s") else w)
+    leaves = [("code", "in", EXCLUDED_ANALYTIC_CODES)] + [("name", "ilike", h) for h in sorted(hints)]
+    domain = ["|"] * (len(leaves) - 1) + leaves
     accs = _models.execute_kw(DB, _uid, PASSWORD, "account.analytic.account", "search_read",
-        [["|", ("code", "in", EXCLUDED_ANALYTIC_CODES), ("name", "ilike", "annage")]],
+        [domain],
         {"fields": ["id", "name", "code"], "context": {"active_test": False}})
     out = {}
     for a in accs:
