@@ -1,6 +1,9 @@
 import xmlrpc.client
 from datetime import datetime, timedelta, date
 import re
+import json
+import html
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -643,23 +646,38 @@ def map_tasks_to_grid(projects, tasks, weeks):
 
 
 # ============================================================
-# MODE D'AFFICHAGE (toggle bas-droite) + MODE 2 "ÉCRAN"
+# MODE D'AFFICHAGE (toggle bas) + MODE 2 "ÉCRAN"
 # ============================================================
 
 # Hauteur réservée au header + footer en mode 2 (px).
 # Si les cadres dépassent en bas : augmente. S'il reste du vide : diminue.
 MODE2_OFFSET_PX = 280
 
+# Types de tâches qui font "entrer" un projet Engineering dans le Gantt atelier
+WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
+
+# Paramètres du mode 2 (employés, fournisseurs, nb semaines), partagés par tous
+# les écrans. ⚠ Sur Streamlit Cloud, ce fichier est remis à zéro à chaque
+# redéploiement / reboot de l'app : il faut alors refaire les réglages.
+MODE2_SETTINGS_FILE = Path(__file__).with_name("mode2_settings.json")
+
+# Mots-clés utilisés tant qu'aucun fournisseur n'a été choisi dans les paramètres
+DEFAULT_SUPPLIER_KEYWORDS = ["xometry", "kerschgens", "kershgens", "lasersteel",
+                             "cerfontaine", "mottard", "abus"]
+
+JOURS_FR = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+
 
 def render_display_mode_toggle():
-    """Toggle fixé en bas à droite. Renvoie True si mode 2.
+    """Toggle fixé en bas de page. Renvoie True si mode 2.
     L'état est aussi mis dans l'URL (?mode=2) pour survivre à un F5."""
     if "display_mode_2" not in st.session_state:
         st.session_state["display_mode_2"] = st.query_params.get("mode") == "2"
 
     st.markdown("""<style>
     .st-key-display_mode_toggle{
-        position:fixed; right:14px; bottom:3px; z-index:10001;
+        /* right:160px → à gauche du bouton "Manage app" de Streamlit Cloud */
+        position:fixed; right:160px; bottom:3px; z-index:10001;
         width:auto!important; background:#0e1117; border-radius:14px; padding:0 10px;
     }
     .st-key-display_mode_toggle label p{font-size:12px!important;color:#fff!important;}
@@ -689,7 +707,237 @@ def render_footer():
     """, unsafe_allow_html=True)
 
 
-def render_header_mode2():
+# ---------- Paramètres mode 2 (fichier JSON) ----------
+
+def load_mode2_settings():
+    try:
+        data = json.loads(MODE2_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    data.setdefault("atelier_user_ids", [])
+    data.setdefault("montage_user_ids", [])
+    data.setdefault("supplier_ids", None)      # None = auto via DEFAULT_SUPPLIER_KEYWORDS
+    data.setdefault("gantt_weeks", 4)
+    return data
+
+
+def save_mode2_settings(data):
+    try:
+        MODE2_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        st.warning(f"Impossible d'enregistrer les paramètres : {e}")
+
+
+# ---------- Loaders mode 2 ----------
+
+@st.cache_data(ttl=3600)
+def load_internal_users(_uid, _models):
+    users = _models.execute_kw(DB, _uid, PASSWORD, "res.users", "search_read",
+        [[("share", "=", False), ("active", "=", True)]],
+        {"fields": ["id", "name"], "order": "name"})
+    return [(u["id"], u["name"]) for u in users]
+
+
+@st.cache_data(ttl=3600)
+def load_suppliers(_uid, _models):
+    parts = _models.execute_kw(DB, _uid, PASSWORD, "res.partner", "search_read",
+        [[("supplier_rank", ">", 0), ("is_company", "=", True)]],
+        {"fields": ["id", "name"], "order": "name"})
+    return [(p["id"], p["name"]) for p in parts]
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def resolve_supplier_ids(settings, suppliers):
+    """IDs fournisseurs choisis, ou détection auto par mots-clés si jamais réglé."""
+    if settings.get("supplier_ids") is not None:
+        return list(settings["supplier_ids"])
+    ids = []
+    for pid, name in suppliers:
+        full = _norm(name)
+        tokens = {_norm(t) for t in re.split(r"[\s\-_.,/&]+", name or "")}
+        for kw in DEFAULT_SUPPLIER_KEYWORDS:
+            # mots courts ("abus") : mot entier ; mots longs : contenu dans le nom
+            if (len(kw) <= 5 and kw in tokens) or (len(kw) > 5 and kw in full):
+                ids.append(pid)
+                break
+    return ids
+
+
+@st.cache_data(ttl=3600)
+def _task_start_field(_uid, _models):
+    for candidate in ("planned_date_start", "planned_date_begin"):
+        try:
+            _models.execute_kw(DB, _uid, PASSWORD, "project.task", "search_read",
+                [[("id", "=", 0)]], {"fields": [candidate], "limit": 1})
+            return candidate
+        except Exception:
+            pass
+    return None
+
+
+def _to_date(raw):
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(str(raw).split(" ")[0], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300)
+def load_week_tasks_for_users(_uid, _models, user_ids, monday):
+    """Tâches assignées aux utilisateurs donnés qui touchent la semaine (lun→ven)."""
+    if not user_ids:
+        return []
+    friday = monday + timedelta(days=4)
+    start_field = _task_start_field(_uid, _models)
+    fields = ["id", "name", "project_id", "date_deadline", "state", "user_ids"]
+    if start_field:
+        fields.append(start_field)
+    tasks = _models.execute_kw(DB, _uid, PASSWORD, "project.task", "search_read",
+        [[("user_ids", "in", list(user_ids)),
+          ("date_deadline", ">=", monday.strftime("%Y-%m-%d"))]],
+        {"fields": fields})
+    out = []
+    for t in tasks:
+        dl = _to_date(t.get("date_deadline"))
+        if not dl:
+            continue
+        ds = _to_date(t.get(start_field)) if start_field else None
+        ds = min(ds or dl, dl)
+        if ds > friday:
+            continue
+        state = str(t.get("state") or "").lower()
+        out.append({
+            "name": t["name"],
+            "project": t["project_id"][1] if t.get("project_id") else "",
+            "user_ids": t.get("user_ids") or [],
+            "date_start": ds, "date_deadline": dl,
+            "is_done": any(k in state for k in ("done", "cancel", "termi", "close")),
+        })
+    return out
+
+
+@st.cache_data(ttl=300)
+def load_incoming_po_lines(_uid, _models, supplier_ids):
+    """Lignes d'achat confirmées, pas encore totalement reçues, chez ces fournisseurs."""
+    if not supplier_ids:
+        return []
+    lines = _models.execute_kw(DB, _uid, PASSWORD, "purchase.order.line", "search_read",
+        [[("order_id.state", "in", ["purchase", "done"]),
+          ("partner_id", "child_of", list(supplier_ids)),
+          ("product_qty", ">", 0)]],
+        {"fields": ["name", "product_qty", "qty_received", "date_planned",
+                    "partner_id", "order_id", "analytic_distribution"]})
+    return [l for l in lines if (l.get("qty_received") or 0) < l["product_qty"]]
+
+
+def load_workshop_projects(uid, models, monday, weeks):
+    """Projets Engineering ayant au moins une tâche Soudure/Peinture/Câblage/
+    Assemblage/Test dans la fenêtre affichée. Renvoie (projets, toutes leurs tâches)."""
+    end = monday + timedelta(weeks=weeks)
+    projects = load_projects(uid, models, "engineering")
+    pids = tuple(sorted(p["id"] for p in projects))
+    all_tasks = get_tasks(uid, models, pids, monday, end)
+
+    first_ws = {}   # pid -> 1re date de tâche atelier dans la fenêtre (pour le tri)
+    for t in all_tasks:
+        if classify_task_type(t["name"]) not in WORKSHOP_TYPES:
+            continue
+        if t["date_deadline"] < monday or t["date_start"] > end:
+            continue
+        pid = t["project_id"][0]
+        first_ws[pid] = min(first_ws.get(pid, t["date_start"]), t["date_start"])
+
+    sel = sorted([p for p in projects if p["id"] in first_ws],
+                 key=lambda p: (first_ws[p["id"]], extract_project_code(p["display_name"])))
+    sel_ids = {p["id"] for p in sel}
+    tasks = [t for t in all_tasks if t["project_id"][0] in sel_ids]
+    return sel, tasks
+
+
+# ---------- Popup paramètres ----------
+
+@st.dialog("Paramètres de l'affichage écran", width="large")
+def mode2_settings_dialog(uid, models):
+    s = load_mode2_settings()
+    users = load_internal_users(uid, models)
+    user_names = dict(users)
+    user_ids = [i for i, _ in users]
+
+    st.markdown("**Planning de la semaine**")
+    atelier = st.multiselect("Employés Atelier", user_ids,
+        default=[i for i in s["atelier_user_ids"] if i in user_names],
+        format_func=lambda i: user_names.get(i, str(i)))
+    montage = st.multiselect("Employés Montage", user_ids,
+        default=[i for i in s["montage_user_ids"] if i in user_names],
+        format_func=lambda i: user_names.get(i, str(i)))
+
+    st.markdown("**Réceptions**")
+    suppliers = load_suppliers(uid, models)
+    sup_names = dict(suppliers)
+    fournisseurs = st.multiselect("Fournisseurs suivis", [i for i, _ in suppliers],
+        default=[i for i in resolve_supplier_ids(s, suppliers) if i in sup_names],
+        format_func=lambda i: sup_names.get(i, str(i)))
+
+    c1, c2 = st.columns(2)
+    if c1.button("Enregistrer", type="primary", use_container_width=True):
+        s["atelier_user_ids"] = atelier
+        s["montage_user_ids"] = montage
+        s["supplier_ids"] = fournisseurs
+        save_mode2_settings(s)
+        st.rerun()
+    if c2.button("Annuler", use_container_width=True):
+        st.rerun()
+
+
+# ---------- Rendu mode 2 ----------
+
+def _text_color_for(bg):
+    h = bg.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return "#111" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#fff"
+
+
+def _esc(s):
+    # html.escape + "$" neutralisé (sinon st.markdown peut l'interpréter en LaTeX)
+    return html.escape(str(s or ""), quote=True).replace("$", "&#36;")
+
+
+MODE2_CSS = """<style>
+.m2-title{font-size:15px;font-weight:700;margin:0 0 6px 0;color:#eee;}
+.m2-title span{font-weight:400;color:#999;font-size:13px;margin-left:8px;}
+.wp{font-size:12px;}
+.wp-grid{display:grid;row-gap:3px;}
+.wp-head{position:sticky;top:0;background:#0e1117;z-index:3;padding:2px 0 4px;border-bottom:1px solid #444;}
+.wp-day{text-align:center;color:#aaa;font-weight:600;}
+.wp-day.wp-today{color:#fff;background:rgba(255,255,255,.10);border-radius:4px;}
+.wp-group{margin:8px 0 2px;font-weight:700;letter-spacing:.08em;color:#8ab4f8;font-size:11px;
+  text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:2px;}
+.wp-user{border-bottom:1px solid #222;padding:2px 0;}
+.wp-name{align-self:center;color:#ddd;padding-right:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.wp-cell{border-left:1px dashed rgba(255,255,255,.10);min-height:34px;}
+.wp-cell.wp-today{background:rgba(255,255,255,.05);}
+.wp-task{margin:0 2px;border-radius:4px;padding:2px 6px;overflow:hidden;z-index:1;line-height:1.25;}
+.wp-t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.wp-d{font-size:10.5px;opacity:.85;white-space:nowrap;}
+.wp-empty{color:#777;font-style:italic;padding:4px 0;}
+.rc-row{display:grid;grid-template-columns:62px 1fr;column-gap:10px;padding:6px 4px;border-bottom:1px solid #262626;font-size:12.5px;}
+.rc-date{font-weight:700;text-align:center;border-radius:4px;padding:2px 0;line-height:1.2;}
+.rc-date small{display:block;font-weight:400;font-size:10.5px;opacity:.8;}
+.rc-late{background:#b71c1c;color:#fff;}
+.rc-today{background:#FFA000;color:#111;}
+.rc-soon{background:rgba(255,255,255,.08);color:#ddd;}
+.rc-sup{font-weight:700;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rc-info{color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rc-sep{font-size:11px;color:#8ab4f8;text-transform:uppercase;letter-spacing:.08em;margin:8px 0 2px;}
+</style>"""
+
+
+def render_header_mode2(uid, models):
     c1, c2, c3 = st.columns([1, 4, 1.6])
     with c1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
@@ -698,9 +946,234 @@ def render_header_mode2():
     with c2:
         st.markdown("<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
                     unsafe_allow_html=True)
+    with c3:
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        _, cbtn = st.columns([3, 1])
+        if cbtn.button("⚙️", key="m2_settings_btn", help="Paramètres affichage écran",
+                       use_container_width=True):
+            mode2_settings_dialog(uid, models)
 
 
-def render_mode2_layout():
+def build_week_planning_html(groups, tasks, monday, today):
+    days = [monday + timedelta(days=i) for i in range(5)]
+    cols = "130px repeat(5, minmax(0,1fr))"
+    out = ["<div class='wp'>"]
+    head = "".join(
+        f"<div class='wp-day{' wp-today' if d == today else ''}'>{JOURS_FR[i]} {d:%d/%m}</div>"
+        for i, d in enumerate(days))
+    out.append(f"<div class='wp-grid wp-head' style='grid-template-columns:{cols}'><div></div>{head}</div>")
+
+    for gname, users in groups:
+        out.append(f"<div class='wp-group'>{_esc(gname)}</div>")
+        if not users:
+            out.append("<div class='wp-empty'>Aucun employé sélectionné (⚙️ en haut à droite)</div>")
+            continue
+        for user_id, uname in users:
+            items = []
+            for t in tasks:
+                if user_id not in t["user_ids"]:
+                    continue
+                s_idx = max(0, (t["date_start"] - monday).days)
+                e_idx = min(4, (t["date_deadline"] - monday).days)
+                if e_idx < 0 or s_idx > 4 or s_idx > e_idx:
+                    continue
+                items.append((s_idx, e_idx, t))
+            items.sort(key=lambda x: (x[0], x[1]))
+
+            # Répartition en "couloirs" pour que les tâches qui se chevauchent s'empilent
+            lanes_end, placed = [], []
+            for s_idx, e_idx, t in items:
+                lane = next((i for i, le in enumerate(lanes_end) if s_idx > le), None)
+                if lane is None:
+                    lanes_end.append(e_idx)
+                    lane = len(lanes_end) - 1
+                else:
+                    lanes_end[lane] = e_idx
+                placed.append((lane, s_idx, e_idx, t))
+            n = max(1, len(lanes_end))
+
+            cells = [f"<div class='wp-name' style='grid-row:1/span {n};grid-column:1'>{_esc(uname)}</div>"]
+            for li in range(n):
+                for di, d in enumerate(days):
+                    cells.append(f"<div class='wp-cell{' wp-today' if d == today else ''}' "
+                                 f"style='grid-row:{li + 1};grid-column:{di + 2}'></div>")
+            for lane, s_idx, e_idx, t in placed:
+                ttype = classify_task_type(t["name"])
+                bg = COLOR_MAP_DONE[ttype] if t["is_done"] else COLOR_MAP[ttype]
+                fg = _text_color_for(bg)
+                tip = f"{t['name']} — {t['project']}"
+                cells.append(
+                    f"<div class='wp-task' title='{_esc(tip)}' style='grid-row:{lane + 1};"
+                    f"grid-column:{s_idx + 2}/{e_idx + 3};background:{bg};color:{fg}'>"
+                    f"<div class='wp-t'>{_esc(t['name'])}</div>"
+                    f"<div class='wp-d'>{t['date_start']:%d/%m} → {t['date_deadline']:%d/%m}</div></div>")
+            out.append(f"<div class='wp-grid wp-user' style='grid-template-columns:{cols}'>{''.join(cells)}</div>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def render_zone_planning_semaine(uid, models, settings):
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    friday = monday + timedelta(days=4)
+    st.markdown(f"<div class='m2-title'>Planning semaine {monday.isocalendar()[1]}"
+                f"<span>{monday:%d/%m} → {friday:%d/%m}</span></div>", unsafe_allow_html=True)
+
+    users = dict(load_internal_users(uid, models))
+    atelier = [(i, users[i]) for i in settings["atelier_user_ids"] if i in users]
+    montage = [(i, users[i]) for i in settings["montage_user_ids"] if i in users]
+    all_ids = tuple(sorted({i for i, _ in atelier + montage}))
+    tasks = load_week_tasks_for_users(uid, models, all_ids, monday)
+
+    st.markdown(build_week_planning_html([("Atelier", atelier), ("Montage", montage)],
+                                         tasks, monday, today), unsafe_allow_html=True)
+
+
+def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, weeks):
+    ct, cs = st.columns([4, 1])
+    with ct:
+        st.markdown(f"<div class='m2-title'>Gantt atelier — Engineering"
+                    f"<span>{len(projects)} projets · {weeks} semaines</span></div>",
+                    unsafe_allow_html=True)
+    with cs:
+        new_weeks = st.slider("Semaines", 2, 8, value=weeks, key="m2_gantt_weeks",
+                              label_visibility="collapsed")
+        if new_weeks != weeks:
+            settings["gantt_weeks"] = new_weeks
+            save_mode2_settings(settings)
+            st.rerun()
+
+    if not projects:
+        st.info("Aucun projet Engineering avec soudure / peinture / câblage / assemblage / test "
+                "sur la période.")
+        return
+
+    end = monday + timedelta(weeks=weeks)
+
+    # Libellés uniques (évite que 2 projets au libellé identique fusionnent sur 1 ligne)
+    labels, seen = {}, {}
+    for p in projects:
+        lbl = project_label(p)
+        seen[lbl] = seen.get(lbl, 0) + 1
+        labels[p["id"]] = lbl if seen[lbl] == 1 else f"{lbl} ({seen[lbl]})"
+    order = [labels[p["id"]] for p in projects]
+
+    rows = []
+    for t in tasks:
+        if t["date_deadline"] < monday or t["date_start"] > end:
+            continue
+        ttype = classify_task_type(t["name"])
+        rows.append({
+            "Tâche": t["name"],
+            "Projet": labels[t["project_id"][0]],
+            "Début": pd.Timestamp(t["date_start"]),
+            "Fin": pd.Timestamp(t["date_deadline"]) + pd.Timedelta(days=1),   # fin incluse
+            "Type": ttype,
+            "Légende": ttype + "__done" if t.get("is_done") else ttype,
+            "Échéance": t["date_deadline"].strftime("%d/%m/%Y"),
+        })
+    if not rows:
+        st.info("Aucune tâche sur la période.")
+        return
+
+    df = pd.DataFrame(rows)
+    full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
+    fig = px.timeline(df, x_start="Début", x_end="Fin", y="Projet", color="Légende",
+                      color_discrete_map=full_color_map, hover_name="Tâche",
+                      hover_data={"Début": False, "Fin": False, "Projet": True,
+                                  "Légende": False, "Type": True, "Échéance": True})
+    for trace in fig.data:
+        if trace.name.endswith("__done"):
+            trace.showlegend = False
+            trace.name = trace.name.replace("__done", "")
+
+    fig.update_layout(
+        barmode="overlay", height=max(260, len(order) * 24 + 70),
+        margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(categoryorder="array", categoryarray=list(reversed(order)),
+                   title_text="", tickfont=dict(size=11),
+                   showgrid=True, gridcolor="rgba(180,180,180,0.15)"),
+        xaxis=dict(title_text="", showgrid=False, range=[monday, end],
+                   dtick=7 * 24 * 3600 * 1000, tick0=monday.strftime("%Y-%m-%d"),
+                   tickformat="S%V<br>%d/%m"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5,
+                    font=dict(size=10), title_text=""),
+    )
+    today = date.today()
+    fig.add_vline(x=today, line_width=2, line_color="white", opacity=0.9)
+    d = monday
+    while d < end:
+        fig.add_vrect(x0=d + timedelta(days=5), x1=d + timedelta(days=7),
+                      fillcolor="rgba(255,255,255,0.04)", layer="below", line_width=0)
+        d += timedelta(days=7)
+
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displaylogo": False, "displayModeBar": False})
+
+
+def render_zone_receptions(uid, models, settings, projects):
+    st.markdown("<div class='m2-title'>Réceptions à venir<span>projets du Gantt atelier</span></div>",
+                unsafe_allow_html=True)
+
+    suppliers = load_suppliers(uid, models)
+    sup_ids = tuple(sorted(resolve_supplier_ids(settings, suppliers)))
+    if not sup_ids:
+        st.info("Aucun fournisseur sélectionné (⚙️ en haut à droite).")
+        return
+    if not projects:
+        st.info("Aucun projet dans le Gantt atelier.")
+        return
+
+    # compte analytique -> projet
+    aid_to_proj = {p["analytic_account_id"][0]: p for p in projects if p.get("analytic_account_id")}
+    lines = load_incoming_po_lines(uid, models, sup_ids)
+
+    groups = {}   # (date, fournisseur, PO, projet) -> [descriptions]
+    for l in lines:
+        proj = None
+        for key in (l.get("analytic_distribution") or {}):
+            for part in str(key).split(","):          # clés "12,34" possibles (Odoo 17+)
+                if part.strip().isdigit() and int(part) in aid_to_proj:
+                    proj = aid_to_proj[int(part)]
+                    break
+            if proj:
+                break
+        if not proj:
+            continue
+        dp = _to_date(l.get("date_planned"))
+        sup = (l["partner_id"][1] if l.get("partner_id") else "?").split(", ")[0]
+        po = l["order_id"][1] if l.get("order_id") else ""
+        groups.setdefault((dp or date.max, sup, po, proj["id"]), []).append(l["name"] or "")
+
+    if not groups:
+        st.info("Aucune réception en attente pour ces projets.")
+        return
+
+    today = date.today()
+    proj_by_id = {p["id"]: p for p in projects}
+    out, last_sep = [], None
+    for (dp, sup, po, pid), descs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        sep = "Sans date" if dp == date.max else ("En retard" if dp < today else "À venir")
+        if sep != last_sep:
+            out.append(f"<div class='rc-sep'>{sep}</div>")
+            last_sep = sep
+
+        if dp == date.max:
+            cls, dtxt = "rc-soon", "—"
+        else:
+            cls = "rc-late" if dp < today else ("rc-today" if dp == today else "rc-soon")
+            dtxt = f"{dp:%d/%m}<small>{JOURS_FR[dp.weekday()]}</small>"
+        n = len(descs)
+        art = short_desc(descs[0].split("\n")[0], 40) if n == 1 else f"{n} articles"
+        info = f"{po} · {project_label(proj_by_id[pid])} · {art}"
+        out.append(f"<div class='rc-row' title='{_esc(chr(10).join(descs))}'>"
+                   f"<div class='rc-date {cls}'>{dtxt}</div>"
+                   f"<div><div class='rc-sup'>{_esc(sup)}</div>"
+                   f"<div class='rc-info'>{_esc(info)}</div></div></div>")
+    st.markdown("".join(out), unsafe_allow_html=True)
+
+
+def render_mode2_layout(uid, models):
     """70 % : 2 lignes identiques empilées | 30 % : 1 cadre pleine hauteur."""
     h_side = f"calc(100vh - {MODE2_OFFSET_PX}px)"
     h_row  = f"calc(50vh - {MODE2_OFFSET_PX / 2 + 8}px)"   # 8 px = moitié de l'espace entre les 2 lignes
@@ -715,29 +1188,40 @@ def render_mode2_layout():
     .st-key-m2_top, .st-key-m2_bottom {{ height: {h_row} !important; }}
     .st-key-m2_side {{ height: {h_side} !important; }}
     </style>""", unsafe_allow_html=True)
+    st.markdown(MODE2_CSS, unsafe_allow_html=True)
+
+    settings = load_mode2_settings()
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    weeks = int(settings.get("gantt_weeks") or 4)
+
+    ws_projects, ws_tasks, ws_error = [], [], None
+    try:
+        ws_projects, ws_tasks = load_workshop_projects(uid, models, monday, weeks)
+    except Exception as e:
+        ws_error = e
 
     left, right = st.columns([7, 3], gap="medium")
     with left:
         with st.container(key="m2_top"):
-            render_zone_haut()
+            try:
+                render_zone_planning_semaine(uid, models, settings)
+            except Exception as e:
+                st.error(f"Planning semaine : {e}")
         with st.container(key="m2_bottom"):
-            render_zone_bas()
+            if ws_error:
+                st.error(f"Gantt atelier : {ws_error}")
+            else:
+                try:
+                    render_zone_gantt_atelier(uid, models, settings, ws_projects, ws_tasks, monday, weeks)
+                except Exception as e:
+                    st.error(f"Gantt atelier : {e}")
     with right:
         with st.container(key="m2_side"):
-            render_zone_droite()
-
-
-# Contenu des zones du mode 2 (à remplir)
-def render_zone_haut():
-    st.caption("Zone haut")
-
-
-def render_zone_bas():
-    st.caption("Zone bas")
-
-
-def render_zone_droite():
-    st.caption("Zone droite")
+            try:
+                render_zone_receptions(uid, models, settings, ws_projects)
+            except Exception as e:
+                st.error(f"Réceptions : {e}")
 
 
 # ============================================================
@@ -770,8 +1254,8 @@ def main():
     render_footer()
 
     if mode2:
-        render_header_mode2()
-        render_mode2_layout()
+        render_header_mode2(uid, models)
+        render_mode2_layout(uid, models)
         return
 
     # ===================== MODE 1 (inchangé) =====================
