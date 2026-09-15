@@ -651,7 +651,7 @@ def map_tasks_to_grid(projects, tasks, weeks):
 
 # Hauteur réservée au header + footer en mode 2 (px).
 # Si les cadres dépassent en bas : augmente. S'il reste du vide : diminue.
-MODE2_OFFSET_PX = 280
+MODE2_OFFSET_PX = 56
 
 # Types de tâches qui font "entrer" un projet Engineering dans le Gantt atelier
 WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
@@ -678,9 +678,9 @@ def render_display_mode_toggle():
     .st-key-display_mode_toggle{
         /* right:160px → à gauche du bouton "Manage app" de Streamlit Cloud */
         position:fixed; right:160px; bottom:3px; z-index:10001;
-        width:auto!important; background:#0e1117; border-radius:14px; padding:0 10px;
+        width:auto!important; background:transparent; padding:0 10px;
     }
-    .st-key-display_mode_toggle label p{font-size:12px!important;color:#fff!important;}
+    .st-key-display_mode_toggle label p{font-size:12px!important;color:#111!important;}
     </style>""", unsafe_allow_html=True)
 
     with st.container(key="display_mode_toggle"):
@@ -718,6 +718,8 @@ def load_mode2_settings():
     data.setdefault("montage_user_ids", [])
     data.setdefault("supplier_ids", None)      # None = auto via DEFAULT_SUPPLIER_KEYWORDS
     data.setdefault("gantt_weeks", 4)
+    data.setdefault("show_atelier", True)
+    data.setdefault("show_montage", True)
     return data
 
 
@@ -869,6 +871,9 @@ def mode2_settings_dialog(uid, models):
     user_ids = [i for i, _ in users]
 
     st.markdown("**Planning de la semaine**")
+    t1, t2 = st.columns(2)
+    show_atelier = t1.toggle("Afficher Atelier", value=s["show_atelier"])
+    show_montage = t2.toggle("Afficher Montage", value=s["show_montage"])
     atelier = st.multiselect("Employés Atelier", user_ids,
         default=[i for i in s["atelier_user_ids"] if i in user_names],
         format_func=lambda i: user_names.get(i, str(i)))
@@ -885,6 +890,8 @@ def mode2_settings_dialog(uid, models):
 
     c1, c2 = st.columns(2)
     if c1.button("Enregistrer", type="primary", use_container_width=True):
+        s["show_atelier"] = show_atelier
+        s["show_montage"] = show_montage
         s["atelier_user_ids"] = atelier
         s["montage_user_ids"] = montage
         s["supplier_ids"] = fournisseurs
@@ -904,7 +911,10 @@ def _text_color_for(bg):
 
 def _esc(s):
     # html.escape + "$" neutralisé (sinon st.markdown peut l'interpréter en LaTeX)
-    return html.escape(str(s or ""), quote=True).replace("$", "&#36;")
+    # + retours à la ligne encodés : une ligne vide dans le HTML fait sortir
+    #   st.markdown du mode HTML et la suite s'affiche en texte brut.
+    s = html.escape(str(s or ""), quote=True).replace("$", "&#36;")
+    return s.replace("\r", "").replace("\n", "&#10;")
 
 
 MODE2_CSS = """<style>
@@ -938,19 +948,35 @@ MODE2_CSS = """<style>
 
 
 def render_header_mode2(uid, models):
-    c1, c2, c3 = st.columns([1, 4, 1.6])
-    with c1:
-        st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
-        st.markdown("<div style='color:green;font-weight:bold;margin-top:20px;'>Connecté Odoo</div>",
-                    unsafe_allow_html=True)
-    with c2:
-        st.markdown("<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
-                    unsafe_allow_html=True)
-    with c3:
-        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-        _, cbtn = st.columns([3, 1])
-        if cbtn.button("⚙️", key="m2_settings_btn", help="Paramètres affichage écran",
-                       use_container_width=True):
+    """Mode écran plein écran : pas de header (ni logo, ni titre, ni barre Streamlit).
+    Le bouton ⚙️ est placé dans le footer, à gauche du toggle."""
+    st.markdown("""<style>
+    header[data-testid="stHeader"]{display:none!important;}
+    [data-testid="stMainBlockContainer"], .block-container{
+        padding-top:0.6rem!important; padding-left:1rem!important; padding-right:1rem!important;
+        max-width:100%!important;
+    }
+    /* Les blocs invisibles (CSS, autorefresh, toggle, ⚙️) prennent chacun ~16 px d'espace :
+       on les sort du flux pour qu'ils ne poussent plus le contenu vers le bas. */
+    .element-container:has(style), .stElementContainer:has(style),
+    .element-container:has(iframe[title*="autorefresh"]), .stElementContainer:has(iframe[title*="autorefresh"]),
+    [data-testid="stLayoutWrapper"]:has(> .st-key-display_mode_toggle),
+    [data-testid="stLayoutWrapper"]:has(> .st-key-m2_settings_box){
+        position:absolute!important; height:0!important; overflow:visible;
+    }
+    .st-key-m2_settings_box{
+        position:fixed; right:290px; bottom:2px; z-index:10001; width:auto!important;
+    }
+    .st-key-m2_settings_box button{
+        background:transparent!important; border:none!important; color:#111!important;
+        min-height:0!important; padding:2px 8px!important; font-size:13px!important;
+    }
+    .st-key-m2_settings_box button:hover{background:rgba(0,0,0,.08)!important;}
+    .st-key-m2_settings_box button p{color:#111!important;font-size:13px!important;}
+    </style>""", unsafe_allow_html=True)
+
+    with st.container(key="m2_settings_box"):
+        if st.button("⚙️ Paramètres", key="m2_settings_btn", help="Paramètres affichage écran"):
             mode2_settings_dialog(uid, models)
 
 
@@ -966,7 +992,7 @@ def build_week_planning_html(groups, tasks, monday, today):
     for gname, users in groups:
         out.append(f"<div class='wp-group'>{_esc(gname)}</div>")
         if not users:
-            out.append("<div class='wp-empty'>Aucun employé sélectionné (⚙️ en haut à droite)</div>")
+            out.append("<div class='wp-empty'>Aucun employé sélectionné (⚙️ en bas de l'écran)</div>")
             continue
         for user_id, uname in users:
             items = []
@@ -1020,13 +1046,18 @@ def render_zone_planning_semaine(uid, models, settings):
                 f"<span>{monday:%d/%m} → {friday:%d/%m}</span></div>", unsafe_allow_html=True)
 
     users = dict(load_internal_users(uid, models))
-    atelier = [(i, users[i]) for i in settings["atelier_user_ids"] if i in users]
-    montage = [(i, users[i]) for i in settings["montage_user_ids"] if i in users]
-    all_ids = tuple(sorted({i for i, _ in atelier + montage}))
+    groups = []
+    if settings.get("show_atelier", True):
+        groups.append(("Atelier", [(i, users[i]) for i in settings["atelier_user_ids"] if i in users]))
+    if settings.get("show_montage", True):
+        groups.append(("Montage", [(i, users[i]) for i in settings["montage_user_ids"] if i in users]))
+    if not groups:
+        st.info("Atelier et Montage sont masqués (⚙️ en bas de l'écran).")
+        return
+    all_ids = tuple(sorted({i for _, g in groups for i, _ in g}))
     tasks = load_week_tasks_for_users(uid, models, all_ids, monday)
 
-    st.markdown(build_week_planning_html([("Atelier", atelier), ("Montage", montage)],
-                                         tasks, monday, today), unsafe_allow_html=True)
+    st.markdown(build_week_planning_html(groups, tasks, monday, today), unsafe_allow_html=True)
 
 
 def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, weeks):
@@ -1118,7 +1149,7 @@ def render_zone_receptions(uid, models, settings, projects):
     suppliers = load_suppliers(uid, models)
     sup_ids = tuple(sorted(resolve_supplier_ids(settings, suppliers)))
     if not sup_ids:
-        st.info("Aucun fournisseur sélectionné (⚙️ en haut à droite).")
+        st.info("Aucun fournisseur sélectionné (⚙️ en bas de l'écran).")
         return
     if not projects:
         st.info("Aucun projet dans le Gantt atelier.")
