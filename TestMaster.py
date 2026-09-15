@@ -106,10 +106,11 @@ def fmt_eur(val):
 
 
 # Projets exclus des DEUX modes selon leur compte analytique.
-# Un compte est exclu si son CODE (champ "Référence" dans Odoo) est dans
-# EXCLUDED_ANALYTIC_CODES, ou si son nom contient un des libellés
-# (comparaison sans accents ni majuscules).
-EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)"]
+# Un compte est exclu si son NOM est exactement un des libellés ci-dessous
+# (sans tenir compte des accents, majuscules, ni du singulier/pluriel
+# "Dépannage"/"Dépannages"), ou si son CODE (champ "Référence") est listé.
+# ⚠ Correspondance EXACTE : "Dépannages (LIG) + stock" n'est PAS exclu.
+EXCLUDED_ANALYTIC_ACCOUNTS = ["Dépannages (LIG)", "Dépannages (Liège)"]
 EXCLUDED_ANALYTIC_CODES = ["DEP_LIG"]
 
 
@@ -118,7 +119,15 @@ def _norm_txt(s):
     return " ".join(s.lower().split())
 
 
-_EXCLUDED_ACC_NORM = [_norm_txt(a) for a in EXCLUDED_ANALYTIC_ACCOUNTS]
+def _norm_acc_name(s):
+    """Nom de compte normalisé : sans préfixe "[code] ", sans accents/majuscules,
+    "depannages" ramené à "depannage"."""
+    n = _norm_txt(s)
+    n = re.sub(r"^\[[^\]]*\]\s*", "", n)
+    return re.sub(r"\bdepannages\b", "depannage", n)
+
+
+_EXCLUDED_ACC_NORM = {_norm_acc_name(a) for a in EXCLUDED_ANALYTIC_ACCOUNTS}
 _EXCLUDED_CODES_NORM = {_norm_txt(c) for c in EXCLUDED_ANALYTIC_CODES}
 
 
@@ -126,8 +135,8 @@ def is_excluded_account(account):
     """account = valeur many2one Odoo [id, nom] (ou False). Test sur le nom seul."""
     if not account:
         return False
-    name = _norm_txt(account[1] if isinstance(account, (list, tuple)) else account)
-    return any(ex in name for ex in _EXCLUDED_ACC_NORM)
+    name = account[1] if isinstance(account, (list, tuple)) else account
+    return _norm_acc_name(name) in _EXCLUDED_ACC_NORM
 
 
 @st.cache_data(ttl=600)
@@ -139,7 +148,7 @@ def excluded_accounts(_uid, _models):
     out = {}
     for a in accs:
         code = a.get("code") or ""
-        if _norm_txt(code) in _EXCLUDED_CODES_NORM or any(ex in _norm_txt(a.get("name")) for ex in _EXCLUDED_ACC_NORM):
+        if _norm_txt(code) in _EXCLUDED_CODES_NORM or _norm_acc_name(a.get("name")) in _EXCLUDED_ACC_NORM:
             out[a["id"]] = f"[{code}] {a.get('name')}" if code else str(a.get("name"))
     return out
 
@@ -961,6 +970,64 @@ def load_workshop_projects(uid, models, monday, weeks):
 
 # ---------- Popup paramètres ----------
 
+def render_po_diagnostic(uid, models, po_txt):
+    """Affiche, pour chaque ligne des commandes données, les comptes analytiques
+    imputés (code, nom, plan) et pourquoi la ligne est affichée ou non en mode 2."""
+    names = [n.strip() for n in re.split(r"[,;\s]+", po_txt) if n.strip()]
+    domain = []
+    for n in names:
+        domain = (["|"] + domain if domain else []) + [("order_id.name", "ilike", n)]
+    lines = models.execute_kw(DB, uid, PASSWORD, "purchase.order.line", "search_read",
+        [domain], {"fields": ["order_id", "partner_id", "name", "product_qty", "qty_received",
+                              "date_planned", "analytic_distribution"], "limit": 200})
+    if not lines:
+        st.warning("Aucune ligne trouvée pour ces commandes.")
+        return
+
+    all_acc = sorted({i for l in lines for i in dist_account_ids(l.get("analytic_distribution"))})
+    acc_info = {}
+    if all_acc:
+        try:
+            accs = models.execute_kw(DB, uid, PASSWORD, "account.analytic.account", "read",
+                [all_acc], {"fields": ["name", "code", "plan_id"], "context": {"active_test": False}})
+        except Exception:
+            accs = models.execute_kw(DB, uid, PASSWORD, "account.analytic.account", "read",
+                [all_acc], {"fields": ["name", "code"], "context": {"active_test": False}})
+        for a in accs:
+            plan = a["plan_id"][1] if a.get("plan_id") else ""
+            code = f"[{a['code']}] " if a.get("code") else ""
+            acc_info[a["id"]] = f"{a['id']} = {code}{a['name']}" + (f" ({plan})" if plan else "")
+
+    excl_acc = set(excluded_accounts(uid, models))
+    eng = load_projects(uid, models, "engineering")
+    aid_to_code = {p["analytic_account_id"][0]: extract_project_code(p["display_name"]) or p["display_name"]
+                   for p in eng if p.get("analytic_account_id")}
+
+    rows = []
+    for l in lines:
+        ids = dist_account_ids(l.get("analytic_distribution"))
+        proj = [aid_to_code[i] for i in ids if i in aid_to_code]
+        if ids & excl_acc:
+            verdict = "Masquée : compte exclu"
+        elif not proj:
+            verdict = "Masquée : aucun projet Engineering en cours"
+        elif (l.get("qty_received") or 0) >= l["product_qty"]:
+            verdict = "Masquée : déjà reçue"
+        else:
+            verdict = "Affichée (si fournisseur suivi)"
+        rows.append({
+            "Commande": l["order_id"][1] if l.get("order_id") else "",
+            "Article": short_desc((l.get("name") or "").split("\n")[0], 40),
+            "Reçu": f"{l.get('qty_received') or 0:g}/{l['product_qty']:g}",
+            "Distribution brute": json.dumps(l.get("analytic_distribution") or {}),
+            "Comptes": " | ".join(acc_info.get(i, str(i)) for i in sorted(ids)) or "—",
+            "Projet Eng. trouvé": ", ".join(proj) or "—",
+            "Résultat": verdict,
+        })
+    st.caption(f"Comptes exclus (ids) : {sorted(excl_acc) or 'aucun'}")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 @st.dialog("Paramètres de l'affichage écran", width="large")
 def mode2_settings_dialog(uid, models):
     s = load_mode2_settings()
@@ -995,6 +1062,15 @@ def mode2_settings_dialog(uid, models):
                    + f" — {_n} projet(s) exclu(s) des deux modes.")
     except Exception as e:
         st.caption(f"Exclusions : erreur {e}")
+
+    with st.expander("🔍 Diagnostic commande d'achat"):
+        po_txt = st.text_input("N° de commande(s)", placeholder="P25-02050, P25-0360",
+                               key="m2_diag_po")
+        if po_txt.strip():
+            try:
+                render_po_diagnostic(uid, models, po_txt)
+            except Exception as e:
+                st.error(f"Diagnostic : {e}")
 
     c1, c2 = st.columns(2)
     if c1.button("Enregistrer", type="primary", use_container_width=True):
