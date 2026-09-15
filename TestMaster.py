@@ -825,13 +825,15 @@ def load_week_tasks_for_users(_uid, _models, user_ids, monday):
 
 @st.cache_data(ttl=300)
 def load_incoming_po_lines(_uid, _models, supplier_ids):
-    """Lignes d'achat confirmées, pas encore totalement reçues, chez ces fournisseurs."""
-    if not supplier_ids:
-        return []
+    """Lignes d'achat confirmées, pas encore totalement reçues.
+    supplier_ids = None → tous les fournisseurs ; tuple → uniquement ceux-là."""
+    domain = [("order_id.state", "in", ["purchase", "done"]), ("product_qty", ">", 0)]
+    if supplier_ids is not None:
+        if not supplier_ids:
+            return []
+        domain.append(("partner_id", "child_of", list(supplier_ids)))
     lines = _models.execute_kw(DB, _uid, PASSWORD, "purchase.order.line", "search_read",
-        [[("order_id.state", "in", ["purchase", "done"]),
-          ("partner_id", "child_of", list(supplier_ids)),
-          ("product_qty", ">", 0)]],
+        [domain],
         {"fields": ["name", "product_qty", "qty_received", "date_planned",
                     "partner_id", "order_id", "analytic_distribution"]})
     return [l for l in lines if (l.get("qty_received") or 0) < l["product_qty"]]
@@ -881,7 +883,7 @@ def mode2_settings_dialog(uid, models):
         default=[i for i in s["montage_user_ids"] if i in user_names],
         format_func=lambda i: user_names.get(i, str(i)))
 
-    st.markdown("**Réceptions**")
+    st.markdown("**Réceptions** (projets Engineering en cours)")
     suppliers = load_suppliers(uid, models)
     sup_names = dict(suppliers)
     fournisseurs = st.multiselect("Fournisseurs suivis", [i for i, _ in suppliers],
@@ -1143,7 +1145,8 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
 
 
 def render_zone_receptions(uid, models, settings, projects):
-    st.markdown("<div class='m2-title'>Réceptions à venir<span>projets du Gantt atelier</span></div>",
+    st.markdown("<div class='m2-title'>Réceptions à venir"
+                "<span>projets Engineering en cours · fournisseurs suivis</span></div>",
                 unsafe_allow_html=True)
 
     suppliers = load_suppliers(uid, models)
@@ -1152,7 +1155,7 @@ def render_zone_receptions(uid, models, settings, projects):
         st.info("Aucun fournisseur sélectionné (⚙️ en bas de l'écran).")
         return
     if not projects:
-        st.info("Aucun projet dans le Gantt atelier.")
+        st.info("Aucun projet Engineering en cours.")
         return
 
     # compte analytique -> projet
@@ -1250,7 +1253,9 @@ def render_mode2_layout(uid, models):
     with right:
         with st.container(key="m2_side"):
             try:
-                render_zone_receptions(uid, models, settings, ws_projects)
+                # Tous les projets Engineering en cours (pas seulement ceux du Gantt atelier)
+                eng_projects = load_projects(uid, models, "engineering")
+                render_zone_receptions(uid, models, settings, eng_projects)
             except Exception as e:
                 st.error(f"Réceptions : {e}")
 
