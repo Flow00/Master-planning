@@ -729,6 +729,59 @@ def classify_task_type(name):
     return "Autres"
 
 
+def split_overlapping_bars(rows, row_key="Projet", window=None):
+    """Évite que des tâches superposées sur la même ligne du Gantt se cachent.
+
+    Chaque row doit avoir "_start" (date, inclus) et "_end" (date, EXCLU).
+    Sur les jours où k tâches se chevauchent, chaque jour est attribué à UNE
+    seule tâche en alternance (jour 1 → tâche A, jour 2 → tâche B, …), pour
+    voir toutes les couleurs. Renvoie des rows avec "Début"/"Fin" par segment.
+    window = (date_from, date_to) : l'alternance jour par jour n'est calculée
+    que dans cette fenêtre (en dehors, les barres restent superposées).
+    """
+    by_row = {}
+    for i, r in enumerate(rows):
+        if r["_end"] > r["_start"]:
+            by_row.setdefault(r[row_key], []).append((i, r))
+
+    segs = {}   # index row -> [(début, fin)]
+    for items in by_row.values():
+        points = sorted({r["_start"] for _, r in items} | {r["_end"] for _, r in items})
+        for a, b in zip(points, points[1:]):
+            # Tâches les plus courtes d'abord : si la zone commune est trop courte
+            # pour montrer tout le monde, ce sont les longues (visibles ailleurs) qui cèdent.
+            active = sorted(((r["_end"] - r["_start"], r["_start"], r.get("_order", i), i)
+                             for i, r in items if r["_start"] <= a and r["_end"] >= b))
+            if not active:
+                continue
+            idx = [x[3] for x in active]
+            outside = window and (b <= window[0] or a >= window[1])
+            if len(idx) == 1 or outside:
+                for i in idx:
+                    segs.setdefault(i, []).append((a, b))
+                continue
+            k = len(idx)
+            d = a
+            while d < b:
+                segs.setdefault(idx[(d - a).days % k], []).append((d, d + timedelta(days=1)))
+                d += timedelta(days=1)
+
+    out = []
+    for i, r in enumerate(rows):
+        if r["_end"] <= r["_start"]:
+            out.append(dict(r, **{"Début": r["_start"], "Fin": r["_end"]}))
+            continue
+        merged = []
+        for a, b in sorted(segs.get(i, [])):
+            if merged and merged[-1][1] >= a:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        for a, b in merged:
+            out.append(dict(r, **{"Début": a, "Fin": b}))
+    return out
+
+
 def build_weeks_horizon(months=3):
     start = date.today()
     end = start + timedelta(days=30 * months)
@@ -1295,22 +1348,27 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
         rows.append({
             "Tâche": t["name"],
             "Projet": labels[t["project_id"][0]],
-            "Début": pd.Timestamp(t["date_start"]),
-            "Fin": pd.Timestamp(t["date_deadline"]) + pd.Timedelta(days=1),   # fin incluse
+            "_start": t["date_start"],
+            "_end": t["date_deadline"] + timedelta(days=1),   # fin incluse
+            "_order": t.get("id", 0),
             "Type": ttype,
             "Légende": ttype + "__done" if t.get("is_done") else ttype,
-            "Échéance": t["date_deadline"].strftime("%d/%m/%Y"),
+            "Période": f"{t['date_start']:%d/%m/%Y} → {t['date_deadline']:%d/%m/%Y}",
         })
     if not rows:
         st.info("Aucune tâche sur la période.")
         return
 
-    df = pd.DataFrame(rows)
+    # Tâches superposées : alternance jour par jour pour voir chaque couleur
+    rows = split_overlapping_bars(rows, "Projet", window=(monday, end))
+    df = pd.DataFrame(rows).drop(columns=["_start", "_end", "_order"])
+    df["Début"] = pd.to_datetime(df["Début"])
+    df["Fin"] = pd.to_datetime(df["Fin"])
     full_color_map = {**COLOR_MAP, **{k + "__done": v for k, v in COLOR_MAP_DONE.items()}}
     fig = px.timeline(df, x_start="Début", x_end="Fin", y="Projet", color="Légende",
                       color_discrete_map=full_color_map, hover_name="Tâche",
                       hover_data={"Début": False, "Fin": False, "Projet": True,
-                                  "Légende": False, "Type": True, "Échéance": True})
+                                  "Légende": False, "Type": True, "Période": True})
     for trace in fig.data:
         if trace.name.endswith("__done"):
             trace.showlegend = False
@@ -1637,21 +1695,27 @@ def main():
             task_type = classify_task_type(t["name"])
             color = COLOR_MAP_DONE[task_type] if t.get("is_done") else COLOR_MAP[task_type]
 
-            start_dt = t["date_start"]
-            end_dt   = t["date_deadline"]
-            if start_dt >= end_dt:
-                end_dt = start_dt + timedelta(days=1)
-
             gantt_data.append({
                 "Tâche":        t["name"],
                 "Projet":       label,
-                "Début":        start_dt,
-                "Fin":          end_dt,
+                "_start":       t["date_start"],
+                "_end":         t["date_deadline"] + timedelta(days=1),   # fin incluse
+                "_order":       t.get("id", 0),
+                "Période":      f"{t['date_start']:%d/%m/%Y} → {t['date_deadline']:%d/%m/%Y}",
                 "Type":         task_type,
                 "is_done":      t.get("is_done", False),
                 "deadline_str": str(t["date_deadline"]),
                 "color":        color,
             })
+
+        # Tâches superposées sur un même projet : alternance jour par jour
+        # (fenêtre = période affichée ± 60 j, pour rester léger si on déplace le graphe)
+        gantt_data = split_overlapping_bars(
+            gantt_data, "Projet",
+            window=(start_view - timedelta(days=60), end_view + timedelta(days=60)))
+        for _r in gantt_data:
+            for _k in ("_start", "_end", "_order"):
+                _r.pop(_k, None)
 
         # Ligne fantôme pour les projets sans tâche planifiée
         _labels_avec_tache = {row["Projet"] for row in gantt_data}
@@ -1662,6 +1726,7 @@ def main():
             gantt_data.append({
                 "Tâche":        "(aucune tâche planifiée)",
                 "Projet":       lbl,
+                "Période":      "",
                 "Début":        today,
                 "Fin":          today,
                 "Type":         "Autres",
@@ -1723,8 +1788,8 @@ def main():
                 color="Légende",
                 color_discrete_map=full_color_map,
                 hover_name="Tâche",
-                hover_data={"Début": True, "Fin": True, "Type": True, "Projet_display": False,
-                            "Légende": False, "is_done": False},
+                hover_data={"Début": False, "Fin": False, "Période": True, "Type": True,
+                            "Projet_display": False, "Légende": False, "is_done": False},
             )
             for trace in fig.data:
                 if trace.name.endswith("__done"):
