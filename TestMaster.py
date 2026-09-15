@@ -1361,6 +1361,19 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
 
     # Tâches superposées : alternance jour par jour pour voir chaque couleur
     rows = split_overlapping_bars(rows, "Projet", window=(monday, end))
+
+    # Barres coupées aux bords de la période affichée : sinon les morceaux hors
+    # cadre (tâches passées) sont "masqués" par Plotly mais laissent des ombres
+    # fantômes sur les écrans très nets, par-dessus les noms de projets.
+    clipped = []
+    for r in rows:
+        a, b = max(r["Début"], monday), min(r["Fin"], end)
+        if b > a:
+            clipped.append(dict(r, **{"Début": a, "Fin": b}))
+    rows = clipped
+    if not rows:
+        st.info("Aucune tâche sur la période.")
+        return
     df = pd.DataFrame(rows).drop(columns=["_start", "_end", "_order"])
     df["Début"] = pd.to_datetime(df["Début"])
     df["Fin"] = pd.to_datetime(df["Fin"])
@@ -1378,9 +1391,10 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
         barmode="overlay", height=max(260, len(order) * 24 + 70),
         margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(categoryorder="array", categoryarray=list(reversed(order)),
-                   title_text="", tickfont=dict(size=11),
+                   title_text="", tickfont=dict(size=11), fixedrange=True,
                    showgrid=True, gridcolor="rgba(180,180,180,0.15)"),
-        xaxis=dict(title_text="", showgrid=False, range=[monday, end],
+        # fixedrange : pas de zoom/déplacement accidentel (écran TV)
+        xaxis=dict(title_text="", showgrid=False, range=[monday, end], fixedrange=True,
                    dtick=7 * 24 * 3600 * 1000, tick0=monday.strftime("%Y-%m-%d"),
                    tickformat="S%V<br>%d/%m"),
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="center", x=0.5,
