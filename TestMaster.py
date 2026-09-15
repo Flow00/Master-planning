@@ -137,7 +137,7 @@ def load_projects(_uid, _models, filter_mode="both"):
     # AJOUT : alias account_id -> analytic_account_id pour le reste du script
     for p in projects:
         p['analytic_account_id'] = p.pop('account_id', None)
-        
+
     # Filet de sécurité Python : exclure tout stage contenant "annul" ou "cancel"
     # (couvre les libellés exotiques non listés ci-dessus).
     def _is_cancelled_stage(p):
@@ -643,6 +643,104 @@ def map_tasks_to_grid(projects, tasks, weeks):
 
 
 # ============================================================
+# MODE D'AFFICHAGE (toggle bas-droite) + MODE 2 "ÉCRAN"
+# ============================================================
+
+# Hauteur réservée au header + footer en mode 2 (px).
+# Si les cadres dépassent en bas : augmente. S'il reste du vide : diminue.
+MODE2_OFFSET_PX = 280
+
+
+def render_display_mode_toggle():
+    """Toggle fixé en bas à droite. Renvoie True si mode 2.
+    L'état est aussi mis dans l'URL (?mode=2) pour survivre à un F5."""
+    if "display_mode_2" not in st.session_state:
+        st.session_state["display_mode_2"] = st.query_params.get("mode") == "2"
+
+    st.markdown("""<style>
+    .st-key-display_mode_toggle{
+        position:fixed; right:14px; bottom:3px; z-index:10001;
+        width:auto!important; background:#0e1117; border-radius:14px; padding:0 10px;
+    }
+    .st-key-display_mode_toggle label p{font-size:12px!important;color:#fff!important;}
+    </style>""", unsafe_allow_html=True)
+
+    with st.container(key="display_mode_toggle"):
+        mode2 = st.toggle("Mode écran", key="display_mode_2")
+
+    if mode2:
+        st.query_params["mode"] = "2"
+    elif "mode" in st.query_params:
+        del st.query_params["mode"]
+    return mode2
+
+
+def render_footer():
+    st.markdown("""
+    <style>
+    .footer {
+        position: fixed; left: 0; bottom: 0; width: 100%;
+        background-color: rgba(240,240,240,0.85); color: #333;
+        text-align: center; padding: 6px 0; font-size: 14px;
+        border-top: 1px solid #ccc; z-index: 9999;
+    }
+    </style>
+    <div class="footer">Flow - Powered by Olsen-Engineering</div>
+    """, unsafe_allow_html=True)
+
+
+def render_header_mode2():
+    c1, c2, c3 = st.columns([1, 4, 1.6])
+    with c1:
+        st.image("https://upload.wikimedia.org/wikipedia/commons/b/ba/Olsen-Logo.png", width=180)
+        st.markdown("<div style='color:green;font-weight:bold;margin-top:20px;'>Connecté Odoo</div>",
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown("<h2 style='text-align:center;margin-top:10px;'>Olsen Dashboard</h2>",
+                    unsafe_allow_html=True)
+
+
+def render_mode2_layout():
+    """70 % : 2 lignes identiques empilées | 30 % : 1 cadre pleine hauteur."""
+    h_side = f"calc(100vh - {MODE2_OFFSET_PX}px)"
+    h_row  = f"calc(50vh - {MODE2_OFFSET_PX / 2 + 8}px)"   # 8 px = moitié de l'espace entre les 2 lignes
+    st.markdown(f"""<style>
+    .block-container {{ padding-bottom: 2.5rem !important; }}
+    .st-key-m2_top, .st-key-m2_bottom, .st-key-m2_side {{
+        border: 1px solid rgba(250,250,250,0.2); border-radius: 8px;
+        padding: 12px; box-sizing: border-box;
+        overflow-y: auto !important; flex: 0 0 auto !important;
+        justify-content: flex-start;
+    }}
+    .st-key-m2_top, .st-key-m2_bottom {{ height: {h_row} !important; }}
+    .st-key-m2_side {{ height: {h_side} !important; }}
+    </style>""", unsafe_allow_html=True)
+
+    left, right = st.columns([7, 3], gap="medium")
+    with left:
+        with st.container(key="m2_top"):
+            render_zone_haut()
+        with st.container(key="m2_bottom"):
+            render_zone_bas()
+    with right:
+        with st.container(key="m2_side"):
+            render_zone_droite()
+
+
+# Contenu des zones du mode 2 (à remplir)
+def render_zone_haut():
+    st.caption("Zone haut")
+
+
+def render_zone_bas():
+    st.caption("Zone bas")
+
+
+def render_zone_droite():
+    st.caption("Zone droite")
+
+
+# ============================================================
 # MAIN APP
 # ============================================================
 
@@ -666,6 +764,17 @@ def main():
         return
 
     st_autorefresh(interval=600000, key="refresh_10min")
+
+    # Toggle mode d'affichage (bas-droite) + footer, rendus pour les 2 modes
+    mode2 = render_display_mode_toggle()
+    render_footer()
+
+    if mode2:
+        render_header_mode2()
+        render_mode2_layout()
+        return
+
+    # ===================== MODE 1 (inchangé) =====================
 
     for k, v in [("months", 3), ("selected_purchase_project_id", None),
                  ("filter_engineering", True), ("filter_standard", False),
@@ -1260,19 +1369,6 @@ def main():
             st.markdown(f"""<div style="border:1px solid #333;border-radius:6px;overflow:hidden;
                 max-height:420px;overflow-y:auto;background:#0e1117;">
                 {hdr}<div>{body}</div></div>""", unsafe_allow_html=True)
-
-    # ── FOOTER ──
-    st.markdown("""
-    <style>
-    .footer {
-        position: fixed; left: 0; bottom: 0; width: 100%;
-        background-color: rgba(240,240,240,0.85); color: #333;
-        text-align: center; padding: 6px 0; font-size: 14px;
-        border-top: 1px solid #ccc; z-index: 9999;
-    }
-    </style>
-    <div class="footer">Flow - Powered by Olsen-Engineering</div>
-    """, unsafe_allow_html=True)
 
 
 # ---------- CLÉ DE DÉCHIFFREMENT (en bas du fichier) ----------
