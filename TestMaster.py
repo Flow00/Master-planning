@@ -6,6 +6,7 @@ import json
 import html
 from pathlib import Path
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -1179,10 +1180,10 @@ MODE2_CSS = """<style>
 .wp-group{margin:8px 0 2px;font-weight:700;letter-spacing:.08em;color:#8ab4f8;font-size:11px;
   text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:2px;}
 .wp-user{border-bottom:1px solid #222;padding:2px 0;}
-.wp-name{align-self:center;color:#ddd;padding-right:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.wp-cell{border-left:1px dashed rgba(255,255,255,.10);min-height:34px;}
+.wp-name{align-self:center;color:#fff;font-size:15px;font-weight:700;padding-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.wp-cell{border-left:1px dashed rgba(255,255,255,.10);min-height:24px;}
 .wp-cell.wp-today{background:rgba(255,255,255,.05);}
-.wp-task{margin:0 2px;border-radius:4px;padding:2px 6px;overflow:hidden;z-index:1;line-height:1.25;}
+.wp-task{margin:0 2px;border-radius:4px;padding:3px 6px;overflow:hidden;z-index:1;line-height:1.25;align-self:center;}
 .wp-t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .wp-d{font-size:10.5px;opacity:.85;white-space:nowrap;}
 .wp-empty{color:#777;font-style:italic;padding:4px 0;}
@@ -1233,7 +1234,7 @@ def render_header_mode2(uid, models):
 
 def build_week_planning_html(groups, tasks, monday, today):
     days = [monday + timedelta(days=i) for i in range(5)]
-    cols = "130px repeat(5, minmax(0,1fr))"
+    cols = "170px repeat(5, minmax(0,1fr))"   # 170 px : place pour les noms en grand
     out = ["<div class='wp'>"]
     head = "".join(
         f"<div class='wp-day{' wp-today' if d == today else ''}'>{JOURS_FR[i]} {d:%d/%m}</div>"
@@ -1278,12 +1279,11 @@ def build_week_planning_html(groups, tasks, monday, today):
                 ttype = classify_task_type(t["name"])
                 bg = COLOR_MAP_DONE[ttype] if t["is_done"] else COLOR_MAP[ttype]
                 fg = _text_color_for(bg)
-                tip = f"{t['name']} — {t['project']}"
+                tip = f"{t['name']} — {t['project']} ({t['date_start']:%d/%m} → {t['date_deadline']:%d/%m})"
                 cells.append(
                     f"<div class='wp-task' title='{_esc(tip)}' style='grid-row:{lane + 1};"
                     f"grid-column:{s_idx + 2}/{e_idx + 3};background:{bg};color:{fg}'>"
-                    f"<div class='wp-t'>{_esc(t['name'])}</div>"
-                    f"<div class='wp-d'>{t['date_start']:%d/%m} → {t['date_deadline']:%d/%m}</div></div>")
+                    f"<div class='wp-t'>{_esc(t['name'])}</div></div>")
             out.append(f"<div class='wp-grid wp-user' style='grid-template-columns:{cols}'>{''.join(cells)}</div>")
     out.append("</div>")
     return "".join(out)
@@ -1387,11 +1387,15 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
             trace.showlegend = False
             trace.name = trace.name.replace("__done", "")
 
+    fig_h = mode2_gantt_height(len(order))
+    row_px = (fig_h - 70) / max(1, len(order))
+    # Noms de projets : jusqu'à 15 px, réduits seulement si les lignes sont très serrées
+    tick_size = max(9, min(15, int(row_px * 0.85)))
     fig.update_layout(
-        barmode="overlay", height=max(260, len(order) * 24 + 70),
+        barmode="overlay", height=fig_h,
         margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(categoryorder="array", categoryarray=list(reversed(order)),
-                   title_text="", tickfont=dict(size=11), fixedrange=True,
+                   title_text="", tickfont=dict(size=tick_size, color="#ffffff"), fixedrange=True,
                    showgrid=True, gridcolor="rgba(180,180,180,0.15)"),
         # fixedrange : pas de zoom/déplacement accidentel (écran TV)
         xaxis=dict(title_text="", showgrid=False, range=[monday, end], fixedrange=True,
@@ -1480,6 +1484,76 @@ def render_zone_receptions(uid, models, settings, projects):
     st.markdown("".join(out), unsafe_allow_html=True)
 
 
+# JS injecté (iframe invisible) : ajuste l'échelle du contenu de chaque cadre du
+# mode 2 pour qu'il tienne en entier dans sa hauteur, sans barre de défilement.
+# Le cadre garde sa taille ; seul son contenu est réduit (jamais agrandi).
+MODE2_FIT_MIN_SCALE = 0.35   # échelle minimale (en dessous, le texte devient illisible)
+
+_MODE2_FIT_JS = """
+<script>
+(function () {
+  const P = window.parent, doc = P.document;
+  const KEYS = ["m2_top", "m2_bottom", "m2_side"];
+  const MIN = %(min)s;
+
+  // Hauteur d'écran transmise à Python (?vh=...) pour dimensionner le Gantt au pixel
+  // près (rendu net, sans mise à l'échelle). Rechargement unique si elle change.
+  let lastVh = null, stableTicks = 0;
+  function checkVh() {
+    const vh = P.innerHeight;
+    stableTicks = (vh === lastVh) ? stableTicks + 1 : 0;
+    lastVh = vh;
+    if (stableTicks < 2) return;                 // attendre que la taille soit stable
+    const url = new URL(P.location.href);
+    const cur = parseInt(url.searchParams.get("vh") || "0", 10);
+    if (Math.abs(cur - vh) > 30) {
+      url.searchParams.set("vh", vh);
+      // exécuté dans le contexte de la page (l'iframe sandboxée ne peut pas naviguer elle-même)
+      P.setTimeout("window.location.replace(" + JSON.stringify(url.toString()) + ")", 0);
+    }
+  }
+
+  function fit() {
+    for (const k of KEYS) {
+      const box = doc.querySelector(".st-key-" + k);
+      const inner = doc.querySelector(".st-key-" + k + "_fit");
+      if (!box || !inner) continue;
+      const cs = P.getComputedStyle(box);
+      const avail = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      const natural = inner.offsetHeight;          // hauteur réelle, non affectée par transform
+      if (!natural || avail <= 0) continue;
+      const cur = parseFloat(inner.dataset.m2z || "1");
+      let z = Math.max(MIN, Math.min(1, avail / natural));
+      if (Math.abs(z - cur) < 0.004) continue;     // évite les micro-oscillations
+      inner.dataset.m2z = z;
+      inner.style.transformOrigin = "top left";
+      inner.style.transform = z < 1 ? "scale(" + z + ")" : "";
+      inner.style.width = z < 1 ? (100 / z) + "%%" : "";
+      inner.style.maxWidth = z < 1 ? "none" : "";
+    }
+  }
+  fit();
+  setInterval(function () { fit(); checkVh(); }, 600);
+})();
+</script>
+"""
+
+
+def mode2_gantt_height(n_rows):
+    """Hauteur du graphique Gantt (px) pour remplir le cadre du bas sans déborder,
+    à partir de la hauteur d'écran transmise par le navigateur (?vh=)."""
+    try:
+        vh = int(st.query_params.get("vh", "0"))
+    except ValueError:
+        vh = 0
+    if vh < 300:
+        return max(260, n_rows * 24 + 70)          # pas encore connue : ancien calcul
+    r_top = max(0.2, min(0.8, MODE2_TOP_RATIO))
+    col = vh - MODE2_OFFSET_PX - 16
+    frame = col * (1 - r_top) - 26                  # padding 12+12 + bordures
+    return max(160, int(frame - 72))                # 72 ≈ titre + curseur + espace
+
+
 def render_mode2_layout(uid, models):
     """70 % : 2 lignes empilées (planning / Gantt) | 30 % : 1 cadre pleine hauteur."""
     h_side = f"calc(100vh - {MODE2_OFFSET_PX}px)"
@@ -1492,14 +1566,24 @@ def render_mode2_layout(uid, models):
     .st-key-m2_top, .st-key-m2_bottom, .st-key-m2_side {{
         border: 1px solid rgba(250,250,250,0.2); border-radius: 8px;
         padding: 12px; box-sizing: border-box;
-        overflow-y: auto !important; flex: 0 0 auto !important;
+        overflow: hidden !important; flex: 0 0 auto !important;
         justify-content: flex-start;
     }}
     .st-key-m2_top {{ height: {h_top} !important; }}
     .st-key-m2_bottom {{ height: {h_bottom} !important; }}
     .st-key-m2_side {{ height: {h_side} !important; }}
+    /* contenu à l'échelle : ne doit pas être comprimé par le flex du cadre */
+    .st-key-m2_top > *, .st-key-m2_bottom > *, .st-key-m2_side > *,
+    .st-key-m2_top_fit, .st-key-m2_bottom_fit, .st-key-m2_side_fit {{
+        flex: 0 0 auto !important; min-height: auto !important;
+    }}
+    [data-testid="stLayoutWrapper"]:has(> .st-key-m2_fit_js), .st-key-m2_fit_js {{
+        position: absolute !important; height: 0 !important; width: 0 !important; overflow: hidden;
+    }}
     </style>""", unsafe_allow_html=True)
     st.markdown(MODE2_CSS, unsafe_allow_html=True)
+    with st.container(key="m2_fit_js"):
+        components.html(_MODE2_FIT_JS % {"min": MODE2_FIT_MIN_SCALE}, height=0)
 
     settings = load_mode2_settings()
     today = date.today()
@@ -1515,26 +1599,29 @@ def render_mode2_layout(uid, models):
     left, right = st.columns([7, 3], gap="medium")
     with left:
         with st.container(key="m2_top"):
-            try:
-                render_zone_planning_semaine(uid, models, settings)
-            except Exception as e:
-                st.error(f"Planning semaine : {e}")
-        with st.container(key="m2_bottom"):
-            if ws_error:
-                st.error(f"Gantt atelier : {ws_error}")
-            else:
+            with st.container(key="m2_top_fit"):
                 try:
-                    render_zone_gantt_atelier(uid, models, settings, ws_projects, ws_tasks, monday, weeks)
+                    render_zone_planning_semaine(uid, models, settings)
                 except Exception as e:
-                    st.error(f"Gantt atelier : {e}")
+                    st.error(f"Planning semaine : {e}")
+        with st.container(key="m2_bottom"):
+            with st.container(key="m2_bottom_fit"):
+                if ws_error:
+                    st.error(f"Gantt atelier : {ws_error}")
+                else:
+                    try:
+                        render_zone_gantt_atelier(uid, models, settings, ws_projects, ws_tasks, monday, weeks)
+                    except Exception as e:
+                        st.error(f"Gantt atelier : {e}")
     with right:
         with st.container(key="m2_side"):
-            try:
-                # Tous les projets Engineering en cours (pas seulement ceux du Gantt atelier)
-                eng_projects = load_projects(uid, models, "engineering")
-                render_zone_receptions(uid, models, settings, eng_projects)
-            except Exception as e:
-                st.error(f"Réceptions : {e}")
+            with st.container(key="m2_side_fit"):
+                try:
+                    # Tous les projets Engineering en cours (pas seulement ceux du Gantt atelier)
+                    eng_projects = load_projects(uid, models, "engineering")
+                    render_zone_receptions(uid, models, settings, eng_projects)
+                except Exception as e:
+                    st.error(f"Réceptions : {e}")
 
 
 # ============================================================
