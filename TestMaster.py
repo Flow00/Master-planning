@@ -765,6 +765,10 @@ def map_tasks_to_grid(projects, tasks, weeks):
 # Si les cadres dépassent en bas : augmente. S'il reste du vide : diminue.
 MODE2_OFFSET_PX = 56
 
+# Part de la hauteur donnée à la 1re ligne (planning semaine) dans la colonne 70 %.
+# 0.50 = 2 lignes égales ; 0.58 = planning un peu plus haut que le Gantt.
+MODE2_TOP_RATIO = 0.58
+
 # Types de tâches qui font "entrer" un projet Engineering dans le Gantt atelier
 WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
 
@@ -1405,9 +1409,12 @@ def render_zone_receptions(uid, models, settings, projects):
 
 
 def render_mode2_layout(uid, models):
-    """70 % : 2 lignes identiques empilées | 30 % : 1 cadre pleine hauteur."""
+    """70 % : 2 lignes empilées (planning / Gantt) | 30 % : 1 cadre pleine hauteur."""
     h_side = f"calc(100vh - {MODE2_OFFSET_PX}px)"
-    h_row  = f"calc(50vh - {MODE2_OFFSET_PX / 2 + 8}px)"   # 8 px = moitié de l'espace entre les 2 lignes
+    # hauteur dispo pour les 2 lignes = hauteur colonne - 16 px d'espace entre elles
+    r_top = max(0.2, min(0.8, MODE2_TOP_RATIO))
+    h_top    = f"calc((100vh - {MODE2_OFFSET_PX + 16}px) * {r_top:.3f})"
+    h_bottom = f"calc((100vh - {MODE2_OFFSET_PX + 16}px) * {1 - r_top:.3f})"
     st.markdown(f"""<style>
     .block-container {{ padding-bottom: 2.5rem !important; }}
     .st-key-m2_top, .st-key-m2_bottom, .st-key-m2_side {{
@@ -1416,7 +1423,8 @@ def render_mode2_layout(uid, models):
         overflow-y: auto !important; flex: 0 0 auto !important;
         justify-content: flex-start;
     }}
-    .st-key-m2_top, .st-key-m2_bottom {{ height: {h_row} !important; }}
+    .st-key-m2_top {{ height: {h_top} !important; }}
+    .st-key-m2_bottom {{ height: {h_bottom} !important; }}
     .st-key-m2_side {{ height: {h_side} !important; }}
     </style>""", unsafe_allow_html=True)
     st.markdown(MODE2_CSS, unsafe_allow_html=True)
