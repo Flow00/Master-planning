@@ -196,6 +196,21 @@ def excluded_project_ids(_uid, _models):
     return out
 
 
+@st.cache_data(ttl=600)
+def depannage_project_ids(_uid, _models):
+    """Projets liés à un compte analytique "Dépannage(s)" (tâches affichées en gris
+    dans le planning de la semaine)."""
+    acc_ids = {i for i, label in excluded_accounts(_uid, _models).items()
+               if "depannage" in _norm_txt(label)}
+    if not acc_ids:
+        return set()
+    fields = project_analytic_fields(_uid, _models)
+    projs = _models.execute_kw(DB, _uid, PASSWORD, "project.project", "search_read",
+        [[]], {"fields": ["id"] + fields, "context": {"active_test": False}})
+    return {p["id"] for p in projs
+            if any(p.get(f) and p[f][0] in acc_ids for f in fields)}
+
+
 # ============================================================
 # LOADERS
 # ============================================================
@@ -716,19 +731,37 @@ COLOR_MAP_DONE = {
 }
 
 
+# Détection du type de tâche d'après son nom.
+# Chaque mot-clé doit se trouver en DÉBUT de mot (sans accents / majuscules) :
+# "Étude selon normes applicables" n'est donc plus pris pour du câblage ("appli-CABL-es").
+# Si plusieurs types sont trouvés, c'est le mot le plus à GAUCHE dans le nom qui gagne
+# ("Étude du câblage" → Étude ; "Câblage armoire suivant étude" → Câblage).
+TASK_TYPE_KEYWORDS = [
+    ("Mise en service", [r"mise en service"]),   # + "MES" en majuscules (voir plus bas)
+    ("Soudure",         [r"soud"]),
+    ("Peinture",        [r"peint"]),
+    ("Assemblage",      [r"assembl"]),
+    ("Câblage",         [r"cabl"]),
+    ("Test",            [r"test", r"essai"]),
+    ("Montage",         [r"montage", r"install"]),
+    ("Réception",       [r"recept", r"assistance"]),
+    ("Transport",       [r"transport"]),
+    ("Étude",           [r"etude", r"conception", r"plans?\b", r"calcul"]),
+]
+_TASK_TYPE_RE = [(t, re.compile(r"\b(?:" + "|".join(kws) + r")")) for t, kws in TASK_TYPE_KEYWORDS]
+
+
 def classify_task_type(name):
-    n = name.lower()
-    if "soud" in n: return "Soudure"
-    if "peint" in n: return "Peinture"
-    if "assembl" in n: return "Assemblage"
-    if "cabl" in n or "câbl" in n: return "Câblage"
-    if "test" in n: return "Test"
-    if "montage" in n or "installation" in n: return "Montage"
-    if "mise en service" in n or " mes" in n: return "Mise en service"
-    if "recept" in n or "réception" in n or "assistance" in n: return "Réception"
-    if "transport" in n: return "Transport"
-    if "etude" in n or "étude" in n or "conception" in n or "plan" in n or "calcul" in n: return "Étude"
-    return "Autres"
+    n = _norm_txt(name)
+    best, best_pos = "Autres", None
+    m = re.search(r"\bMES\b", str(name or ""))        # "MES" majuscules = mise en service ("mes cotes" non)
+    if m:
+        best, best_pos = "Mise en service", m.start()
+    for ttype, rx in _TASK_TYPE_RE:
+        m = rx.search(n)
+        if m and (best_pos is None or m.start() < best_pos):
+            best, best_pos = ttype, m.start()
+    return best
 
 
 def split_overlapping_bars(rows, row_key="Projet", window=None):
@@ -823,6 +856,9 @@ MODE2_OFFSET_PX = 56
 # Part de la hauteur donnée à la 1re ligne (planning semaine) dans la colonne 70 %.
 # 0.50 = 2 lignes égales ; 0.58 = planning un peu plus haut que le Gantt.
 MODE2_TOP_RATIO = 0.58
+
+# Largeur de la colonne de gauche (planning + Gantt) ; la droite (réceptions) prend le reste.
+MODE2_LEFT_RATIO = 0.75
 
 # Types de tâches qui font "entrer" un projet Engineering dans le Gantt atelier
 WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
@@ -998,6 +1034,7 @@ def load_week_tasks_for_users(_uid, _models, user_ids, monday):
     tasks = _models.execute_kw(DB, _uid, PASSWORD, "project.task", "search_read",
         [[("user_ids", "in", list(user_ids))] + date_dom],
         {"fields": fields, "context": ctx})
+    dep_ids = depannage_project_ids(_uid, _models)
     out = []
     for t in tasks:
         dl = _to_date(t.get("date_deadline"))
@@ -1015,7 +1052,31 @@ def load_week_tasks_for_users(_uid, _models, user_ids, monday):
             "user_ids": t.get("user_ids") or [],
             "date_start": ds, "date_deadline": dl,
             "is_done": any(k in state for k in ("done", "cancel", "termi", "close")),
+            "is_depannage": bool(t.get("project_id")) and t["project_id"][0] in dep_ids,
         })
+    return out
+
+
+@st.cache_data(ttl=3600)
+def reception_picking_types(_uid, _models):
+    """Types d'opération "Réceptions" : code incoming ET livrés dans un emplacement
+    interne de l'entreprise (ex. OLSEN LIÈGE: Réceptions → LIG/Stock).
+    Exclut le dropship (livré directement chez le client). Renvoie {id: nom}."""
+    types = _models.execute_kw(DB, _uid, PASSWORD, "stock.picking.type", "search_read",
+        [[("code", "in", ["incoming", "dropship"])]],
+        {"fields": ["id", "display_name", "code", "default_location_dest_id"],
+         "context": {"active_test": False}})
+    loc_ids = list({t["default_location_dest_id"][0] for t in types if t.get("default_location_dest_id")})
+    usage = {}
+    if loc_ids:
+        for l in _models.execute_kw(DB, _uid, PASSWORD, "stock.location", "read",
+                [loc_ids], {"fields": ["usage"], "context": {"active_test": False}}):
+            usage[l["id"]] = l.get("usage")
+    out = {}
+    for t in types:
+        dest = t.get("default_location_dest_id")
+        if t.get("code") == "incoming" and dest and usage.get(dest[0]) == "internal":
+            out[t["id"]] = t.get("display_name") or str(t["id"])
     return out
 
 
@@ -1024,6 +1085,11 @@ def load_incoming_po_lines(_uid, _models, supplier_ids):
     """Lignes d'achat confirmées, pas encore totalement reçues.
     supplier_ids = None → tous les fournisseurs ; tuple → uniquement ceux-là."""
     domain = [("order_id.state", "in", ["purchase", "done"]), ("product_qty", ">", 0)]
+    # Uniquement les commandes "Livrer à : … Réceptions" (pas de dropship)
+    rec_types = list(reception_picking_types(_uid, _models))
+    if not rec_types:
+        return []
+    domain.append(("order_id.picking_type_id", "in", rec_types))
     if supplier_ids is not None:
         if not supplier_ids:
             return []
@@ -1089,8 +1155,16 @@ def render_po_diagnostic(uid, models, po_txt):
             code = f"[{a['code']}] " if a.get("code") else ""
             acc_info[a["id"]] = f"{a['id']} = {code}{a['name']}" + (f" ({plan})" if plan else "")
 
+    order_ids = list({l["order_id"][0] for l in lines if l.get("order_id")})
+    po_type = {}
+    if order_ids:
+        for o in models.execute_kw(DB, uid, PASSWORD, "purchase.order", "read",
+                [order_ids], {"fields": ["picking_type_id"]}):
+            po_type[o["id"]] = o.get("picking_type_id")
+    rec_types = reception_picking_types(uid, models)
+
     excl_acc = set(excluded_accounts(uid, models))
-    eng = load_projects(uid, models, "engineering")
+    eng = load_projects(uid, models, "both")
     aid_to_code = {p["analytic_account_id"][0]: extract_project_code(p["display_name"]) or p["display_name"]
                    for p in eng if p.get("analytic_account_id")}
 
@@ -1098,10 +1172,13 @@ def render_po_diagnostic(uid, models, po_txt):
     for l in lines:
         ids = dist_account_ids(l.get("analytic_distribution"))
         proj = [aid_to_code[i] for i in ids if i in aid_to_code]
-        if ids & excl_acc:
+        ptype = po_type.get(l["order_id"][0]) if l.get("order_id") else None
+        if not ptype or ptype[0] not in rec_types:
+            verdict = "Masquée : pas livrée en Réceptions (dropship ?)"
+        elif ids & excl_acc:
             verdict = "Masquée : compte exclu"
         elif not proj:
-            verdict = "Masquée : aucun projet Engineering en cours"
+            verdict = "Masquée : aucun projet Engineering/Standard en cours"
         elif (l.get("qty_received") or 0) >= l["product_qty"]:
             verdict = "Masquée : déjà reçue"
         else:
@@ -1110,12 +1187,14 @@ def render_po_diagnostic(uid, models, po_txt):
             "Commande": l["order_id"][1] if l.get("order_id") else "",
             "Article": short_desc((l.get("name") or "").split("\n")[0], 40),
             "Reçu": f"{l.get('qty_received') or 0:g}/{l['product_qty']:g}",
+            "Livrer à": ptype[1] if ptype else "—",
             "Distribution brute": json.dumps(l.get("analytic_distribution") or {}),
             "Comptes": " | ".join(acc_info.get(i, str(i)) for i in sorted(ids)) or "—",
-            "Projet Eng. trouvé": ", ".join(proj) or "—",
+            "Projet trouvé": ", ".join(proj) or "—",
             "Résultat": verdict,
         })
-    st.caption(f"Comptes exclus (ids) : {sorted(excl_acc) or 'aucun'}")
+    st.caption(f"Comptes exclus (ids) : {sorted(excl_acc) or 'aucun'} — "
+               f"Types « Réceptions » retenus : {', '.join(rec_types.values()) or 'aucun'}")
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
@@ -1310,9 +1389,12 @@ def build_week_planning_html(groups, tasks, monday, today):
                                  f"style='grid-row:{li + 1};grid-column:{di + 2}'></div>")
             for lane, s_idx, e_idx, t in placed:
                 ttype = classify_task_type(t["name"])
+                if t.get("is_depannage"):
+                    ttype = "Autres"                       # dépannages : toujours en gris
                 bg = COLOR_MAP_DONE[ttype] if t["is_done"] else COLOR_MAP[ttype]
                 fg = _text_color_for(bg)
-                tip = f"{t['name']} — {t['project']} ({t['date_start']:%d/%m} → {t['date_deadline']:%d/%m})"
+                tip = (f"{t['name']} — {t['project']}" + (" [dépannage]" if t.get("is_depannage") else "")
+                       + f" ({t['date_start']:%d/%m} → {t['date_deadline']:%d/%m})")
                 cells.append(
                     f"<div class='wp-task' title='{_esc(tip)}' style='grid-row:{lane + 1};"
                     f"grid-column:{s_idx + 2}/{e_idx + 3};background:{bg};color:{fg}'>"
@@ -1686,7 +1768,8 @@ def render_mode2_layout(uid, models):
     except Exception as e:
         ws_error = e
 
-    left, right = st.columns([7, 3], gap="medium")
+    _l = max(0.4, min(0.9, MODE2_LEFT_RATIO))
+    left, right = st.columns([_l, 1 - _l], gap="medium")
     with left:
         with st.container(key="m2_top"):
             with st.container(key="m2_top_fit"):
