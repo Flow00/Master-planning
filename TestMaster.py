@@ -865,7 +865,7 @@ WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
 
 # Réceptions : horizon max vers l'avant (jours). Les retards restent tous affichés,
 # les lignes sans date prévue sont masquées.
-RECEPTIONS_MAX_DAYS_AHEAD = 61   # ≈ 2 mois
+RECEPTIONS_MAX_DAYS_AHEAD = 61   # valeur par défaut (≈ 2 mois), réglable dans ⚙️ Paramètres
 
 # Paramètres du mode 2 (employés, fournisseurs, nb semaines), partagés par tous
 # les écrans. ⚠ Sur Streamlit Cloud, ce fichier est remis à zéro à chaque
@@ -933,6 +933,7 @@ def load_mode2_settings():
     data.setdefault("show_montage", True)
     data.setdefault("rc_engineering", True)
     data.setdefault("rc_standard", True)
+    data.setdefault("rc_days_ahead", RECEPTIONS_MAX_DAYS_AHEAD)
     return data
 
 
@@ -1224,6 +1225,10 @@ def mode2_settings_dialog(uid, models):
     r1, r2 = st.columns(2)
     rc_eng = r1.toggle("Projets Engineering", value=s["rc_engineering"])
     rc_std = r2.toggle("Projets Standard", value=s["rc_standard"])
+    rc_days = st.number_input("Afficher les livraisons prévues jusqu'à (jours à l'avance)",
+                              min_value=1, max_value=365, step=1,
+                              value=int(s.get("rc_days_ahead") or RECEPTIONS_MAX_DAYS_AHEAD),
+                              help="Les réceptions en retard restent toujours affichées.")
     if not rc_eng and not rc_std:
         st.warning("Au moins un des deux doit être actif : Engineering sera gardé.")
     suppliers = load_suppliers(uid, models)
@@ -1260,6 +1265,7 @@ def mode2_settings_dialog(uid, models):
         s["supplier_ids"] = fournisseurs
         s["rc_engineering"] = rc_eng or not rc_std
         s["rc_standard"] = rc_std
+        s["rc_days_ahead"] = int(rc_days)
         save_mode2_settings(s)
         st.rerun()
     if c2.button("Annuler", use_container_width=True):
@@ -1574,9 +1580,13 @@ def receptions_filter_mode(settings):
 
 def render_zone_receptions(uid, models, settings, projects):
     _, scope = receptions_filter_mode(settings)
+    try:
+        days_ahead = max(1, int(settings.get("rc_days_ahead") or RECEPTIONS_MAX_DAYS_AHEAD))
+    except (TypeError, ValueError):
+        days_ahead = RECEPTIONS_MAX_DAYS_AHEAD
     st.markdown(f"<div class='m2-title'>Réceptions à venir"
                 f"<span>projets {scope} · fournisseurs suivis · "
-                f"{round(RECEPTIONS_MAX_DAYS_AHEAD / 30.5)} mois</span></div>",
+                f"{days_ahead} jours</span></div>",
                 unsafe_allow_html=True)
 
     suppliers = load_suppliers(uid, models)
@@ -1611,7 +1621,7 @@ def render_zone_receptions(uid, models, settings, projects):
             continue
         dp = _to_date(l.get("date_planned"))
         # horizon : pas de date → masqué ; au-delà de ~2 mois → masqué (retards gardés)
-        if dp is None or dp > date.today() + timedelta(days=RECEPTIONS_MAX_DAYS_AHEAD):
+        if dp is None or dp > date.today() + timedelta(days=days_ahead):
             continue
         sup = (l["partner_id"][1] if l.get("partner_id") else "?").split(", ")[0]
         po = l["order_id"][1] if l.get("order_id") else ""
