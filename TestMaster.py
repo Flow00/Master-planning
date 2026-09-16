@@ -5,6 +5,7 @@ import unicodedata
 import json
 import html
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -890,6 +891,8 @@ def load_mode2_settings():
     data.setdefault("gantt_weeks", 4)
     data.setdefault("show_atelier", True)
     data.setdefault("show_montage", True)
+    data.setdefault("rc_engineering", True)
+    data.setdefault("rc_standard", True)
     return data
 
 
@@ -959,6 +962,17 @@ def _to_date(raw):
         return None
 
 
+@st.cache_data(ttl=3600)
+def _user_company_ids(_uid, _models):
+    """Sociétés auxquelles l'utilisateur API a accès (pour ne pas rater de tâches)."""
+    try:
+        u = _models.execute_kw(DB, _uid, PASSWORD, "res.users", "read",
+            [[_uid]], {"fields": ["company_ids"]})
+        return u[0].get("company_ids") or []
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=300)
 def load_week_tasks_for_users(_uid, _models, user_ids, monday):
     """Tâches assignées aux utilisateurs donnés qui touchent la semaine (lun→ven)."""
@@ -969,19 +983,28 @@ def load_week_tasks_for_users(_uid, _models, user_ids, monday):
     fields = ["id", "name", "project_id", "date_deadline", "state", "user_ids"]
     if start_field:
         fields.append(start_field)
+    mon_s = monday.strftime("%Y-%m-%d")
+    # TOUTES les tâches des employés (tous projets, y compris dépannages / sans projet) :
+    # - avec échéance à partir de lundi, ou
+    # - sans échéance mais avec une date de début à partir de lundi
+    date_dom = [("date_deadline", ">=", mon_s)]
+    if start_field:
+        date_dom = ["|", ("date_deadline", ">=", mon_s),
+                    "&", ("date_deadline", "=", False), (start_field, ">=", mon_s)]
+    ctx = {"active_test": True}
+    company_ids = _user_company_ids(_uid, _models)
+    if company_ids:
+        ctx["allowed_company_ids"] = company_ids          # toutes les sociétés (LIG, CHA, LUX…)
     tasks = _models.execute_kw(DB, _uid, PASSWORD, "project.task", "search_read",
-        [[("user_ids", "in", list(user_ids)),
-          ("date_deadline", ">=", monday.strftime("%Y-%m-%d"))]],
-        {"fields": fields})
-    excluded = excluded_project_ids(_uid, _models)
+        [[("user_ids", "in", list(user_ids))] + date_dom],
+        {"fields": fields, "context": ctx})
     out = []
     for t in tasks:
-        if t.get("project_id") and t["project_id"][0] in excluded:
-            continue
         dl = _to_date(t.get("date_deadline"))
-        if not dl:
-            continue
         ds = _to_date(t.get(start_field)) if start_field else None
+        if not dl and not ds:
+            continue
+        dl = dl or ds                                     # sans échéance : 1 jour (date de début)
         ds = min(ds or dl, dl)
         if ds > friday:
             continue
@@ -1114,7 +1137,12 @@ def mode2_settings_dialog(uid, models):
         default=[i for i in s["montage_user_ids"] if i in user_names],
         format_func=lambda i: user_names.get(i, str(i)))
 
-    st.markdown("**Réceptions** (projets Engineering en cours)")
+    st.markdown("**Réceptions**")
+    r1, r2 = st.columns(2)
+    rc_eng = r1.toggle("Projets Engineering", value=s["rc_engineering"])
+    rc_std = r2.toggle("Projets Standard", value=s["rc_standard"])
+    if not rc_eng and not rc_std:
+        st.warning("Au moins un des deux doit être actif : Engineering sera gardé.")
     suppliers = load_suppliers(uid, models)
     sup_names = dict(suppliers)
     fournisseurs = st.multiselect("Fournisseurs suivis", [i for i, _ in suppliers],
@@ -1147,6 +1175,8 @@ def mode2_settings_dialog(uid, models):
         s["atelier_user_ids"] = atelier
         s["montage_user_ids"] = montage
         s["supplier_ids"] = fournisseurs
+        s["rc_engineering"] = rc_eng or not rc_std
+        s["rc_standard"] = rc_std
         save_mode2_settings(s)
         st.rerun()
     if c2.button("Annuler", use_container_width=True):
@@ -1187,6 +1217,9 @@ MODE2_CSS = """<style>
 .wp-t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .wp-d{font-size:10.5px;opacity:.85;white-space:nowrap;}
 .wp-empty{color:#777;font-style:italic;padding:4px 0;}
+.m2-clock{text-align:center;padding:0 0 8px;margin-bottom:4px;border-bottom:1px solid #444;line-height:1.1;}
+.m2-clock-time{font-size:46px;font-weight:700;color:#fff;letter-spacing:.02em;font-variant-numeric:tabular-nums;}
+.m2-clock-date{font-size:16px;color:#bbb;margin-top:2px;}
 .rc-row{display:grid;grid-template-columns:62px 1fr;column-gap:10px;padding:6px 4px;border-bottom:1px solid #262626;font-size:12.5px;}
 .rc-date{font-weight:700;text-align:center;border-radius:4px;padding:2px 0;line-height:1.2;}
 .rc-date small{display:block;font-weight:400;font-size:10.5px;opacity:.8;}
@@ -1428,9 +1461,35 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
                     config={"displaylogo": False, "displayModeBar": False})
 
 
+JOURS_LONG_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+           "septembre", "octobre", "novembre", "décembre"]
+
+
+def render_clock():
+    """Date + heure (hh:mm), heure belge. Mise à jour chaque seconde côté navigateur
+    (voir _MODE2_FIT_JS), sans recharger l'app."""
+    now = datetime.now(ZoneInfo("Europe/Brussels"))
+    d = f"{JOURS_LONG_FR[now.weekday()]} {now.day} {MOIS_FR[now.month - 1]} {now.year}"
+    st.markdown(f"<div class='m2-clock'><div class='m2-clock-time'>{now:%H:%M}</div>"
+                f"<div class='m2-clock-date'>{d.capitalize()}</div></div>",
+                unsafe_allow_html=True)
+
+
+def receptions_filter_mode(settings):
+    eng = settings.get("rc_engineering", True)
+    std = settings.get("rc_standard", True)
+    if eng and std:
+        return "both", "Engineering + Standard"
+    if std:
+        return "standard", "Standard"
+    return "engineering", "Engineering"
+
+
 def render_zone_receptions(uid, models, settings, projects):
-    st.markdown("<div class='m2-title'>Réceptions à venir"
-                "<span>projets Engineering en cours · fournisseurs suivis</span></div>",
+    _, scope = receptions_filter_mode(settings)
+    st.markdown(f"<div class='m2-title'>Réceptions à venir"
+                f"<span>projets {scope} · fournisseurs suivis</span></div>",
                 unsafe_allow_html=True)
 
     suppliers = load_suppliers(uid, models)
@@ -1539,7 +1598,9 @@ _MODE2_FIT_JS = """
       const inner = doc.querySelector(".st-key-" + k + "_fit");
       if (!box || !inner) continue;
       const cs = P.getComputedStyle(box);
-      const avail = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      // place entre le haut du contenu (sous l'horloge éventuelle) et le bas intérieur du cadre
+      const avail = box.getBoundingClientRect().bottom - parseFloat(cs.borderBottomWidth)
+                    - parseFloat(cs.paddingBottom) - inner.getBoundingClientRect().top;
       const natural = inner.offsetHeight;          // hauteur réelle, non affectée par transform
       if (!natural || avail <= 0) continue;
       const cur = parseFloat(inner.dataset.m2z || "1");
@@ -1552,8 +1613,16 @@ _MODE2_FIT_JS = """
       inner.style.maxWidth = z < 1 ? "none" : "";
     }
   }
-  fit();
-  setInterval(function () { fit(); checkGantt(); }, 600);
+  const fmtT = new Intl.DateTimeFormat("fr-BE", {timeZone: "Europe/Brussels", hour: "2-digit", minute: "2-digit", hour12: false});
+  const fmtD = new Intl.DateTimeFormat("fr-BE", {timeZone: "Europe/Brussels", weekday: "long", day: "numeric", month: "long", year: "numeric"});
+  function clock() {
+    const now = new Date();
+    const t = doc.querySelector(".m2-clock-time"), d = doc.querySelector(".m2-clock-date");
+    if (t) { const v = fmtT.format(now); if (t.textContent !== v) t.textContent = v; }
+    if (d) { let v = fmtD.format(now); v = v.charAt(0).toUpperCase() + v.slice(1); if (d.textContent !== v) d.textContent = v; }
+  }
+  fit(); clock();
+  setInterval(function () { fit(); checkGantt(); clock(); }, 600);
 })();
 </script>
 """
@@ -1636,11 +1705,13 @@ def render_mode2_layout(uid, models):
                         st.error(f"Gantt atelier : {e}")
     with right:
         with st.container(key="m2_side"):
+            render_clock()
             with st.container(key="m2_side_fit"):
                 try:
-                    # Tous les projets Engineering en cours (pas seulement ceux du Gantt atelier)
-                    eng_projects = load_projects(uid, models, "engineering")
-                    render_zone_receptions(uid, models, settings, eng_projects)
+                    # Projets en cours Engineering / Standard / les deux (réglage ⚙️)
+                    rc_mode, _ = receptions_filter_mode(settings)
+                    rc_projects = load_projects(uid, models, rc_mode)
+                    render_zone_receptions(uid, models, settings, rc_projects)
                 except Exception as e:
                     st.error(f"Réceptions : {e}")
 
