@@ -224,7 +224,7 @@ def _get_tags(_uid, _models):
     return eng, std, prol
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_projects(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
@@ -288,7 +288,7 @@ def load_projects(_uid, _models, filter_mode="both"):
     return filtered
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_projects_with_closed(_uid, _models, filter_mode="both"):
     uid, models = _uid, _models
     eng, std, prol = _get_tags(uid, models)
@@ -342,7 +342,7 @@ def load_projects_with_closed(_uid, _models, filter_mode="both"):
     return projects
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def get_tasks(_uid, _models, project_ids, start_date, end_date):
     uid, models = _uid, _models
     # Détection du champ date de début selon la version Odoo
@@ -408,7 +408,7 @@ def get_tasks(_uid, _models, project_ids, start_date, end_date):
     return tasks
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_purchase_data_all_projects():
     uid, models = connect_odoo()
     po_data = models.execute_kw(DB, uid, PASSWORD, "purchase.order", "search_read",
@@ -495,7 +495,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
     return counts, formatted
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def compute_all_purchase_data(_uid, _models, filter_mode):
     """Pré-calcule purchase_data pour TOUS les projets actifs (non filtrés).
     Mis en cache pour que le filtre projet global ne déclenche pas de recalcul."""
@@ -509,7 +509,7 @@ def compute_all_purchase_data(_uid, _models, filter_mode):
     return purchase_data, projects
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_all_analytics(_uid, _models, filter_mode):
     """Charge tout l'analytique. Prend filter_mode (string hashable) au lieu
     d'une liste de dicts coûteuse à hasher → cache stable entre reruns."""
@@ -1014,7 +1014,7 @@ def _user_company_ids(_uid, _models):
         return []
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_week_tasks_for_users(_uid, _models, user_ids, monday):
     """Tâches assignées aux utilisateurs donnés qui touchent la semaine (lun→ven)."""
     if not user_ids:
@@ -1085,7 +1085,7 @@ def reception_picking_types(_uid, _models):
     return out
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=240)   # < intervalle d'auto-refresh (5 min) → données relues à chaque refresh
 def load_incoming_po_lines(_uid, _models, supplier_ids):
     """Lignes d'achat confirmées, pas encore totalement reçues.
     supplier_ids = None → tous les fournisseurs ; tuple → uniquement ceux-là."""
@@ -1840,7 +1840,8 @@ def main():
         st.error(f"Connexion Odoo impossible : {e}")
         return
 
-    st_autorefresh(interval=600000, key="refresh_10min")
+    # Rafraîchissement automatique toutes les 5 min (tâches, achats, réceptions…)
+    st_autorefresh(interval=300000, key="refresh_5min")
 
     # Toggle mode d'affichage (bas-droite) + footer, rendus pour les 2 modes
     mode2 = render_display_mode_toggle()
