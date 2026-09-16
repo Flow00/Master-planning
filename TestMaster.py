@@ -738,15 +738,15 @@ COLOR_MAP_DONE = {
 # ("Étude du câblage" → Étude ; "Câblage armoire suivant étude" → Câblage).
 TASK_TYPE_KEYWORDS = [
     ("Mise en service", [r"mise en service"]),   # + "MES" en majuscules (voir plus bas)
-    ("Soudure",         [r"soud"]),
+    ("Soudure",         [r"soud", r"pointage", r"mecano\W?soud"]),
     ("Peinture",        [r"peint"]),
     ("Assemblage",      [r"assembl"]),
     ("Câblage",         [r"cabl"]),
-    ("Test",            [r"test", r"essai"]),
-    ("Montage",         [r"montage", r"install"]),
+    ("Test",            [r"test", r"essai", r"fdr\b"]),
+    ("Montage",         [r"montage", r"demontage", r"pre\W?montage", r"install"]),
     ("Réception",       [r"recept", r"assistance"]),
-    ("Transport",       [r"transport"]),
-    ("Étude",           [r"etude", r"conception", r"plans?\b", r"calcul"]),
+    ("Transport",       [r"transport", r"enlevement"]),
+    ("Étude",           [r"etude", r"conception", r"plans?\b", r"calcul", r"programm"]),
 ]
 _TASK_TYPE_RE = [(t, re.compile(r"\b(?:" + "|".join(kws) + r")")) for t, kws in TASK_TYPE_KEYWORDS]
 
@@ -862,6 +862,10 @@ MODE2_LEFT_RATIO = 0.75
 
 # Types de tâches qui font "entrer" un projet Engineering dans le Gantt atelier
 WORKSHOP_TYPES = {"Soudure", "Peinture", "Câblage", "Assemblage", "Test"}
+
+# Réceptions : horizon max vers l'avant (jours). Les retards restent tous affichés,
+# les lignes sans date prévue sont masquées.
+RECEPTIONS_MAX_DAYS_AHEAD = 61   # ≈ 2 mois
 
 # Paramètres du mode 2 (employés, fournisseurs, nb semaines), partagés par tous
 # les écrans. ⚠ Sur Streamlit Cloud, ce fichier est remis à zéro à chaque
@@ -1571,7 +1575,8 @@ def receptions_filter_mode(settings):
 def render_zone_receptions(uid, models, settings, projects):
     _, scope = receptions_filter_mode(settings)
     st.markdown(f"<div class='m2-title'>Réceptions à venir"
-                f"<span>projets {scope} · fournisseurs suivis</span></div>",
+                f"<span>projets {scope} · fournisseurs suivis · "
+                f"{round(RECEPTIONS_MAX_DAYS_AHEAD / 30.5)} mois</span></div>",
                 unsafe_allow_html=True)
 
     suppliers = load_suppliers(uid, models)
@@ -1605,6 +1610,9 @@ def render_zone_receptions(uid, models, settings, projects):
         if not proj:
             continue
         dp = _to_date(l.get("date_planned"))
+        # horizon : pas de date → masqué ; au-delà de ~2 mois → masqué (retards gardés)
+        if dp is None or dp > date.today() + timedelta(days=RECEPTIONS_MAX_DAYS_AHEAD):
+            continue
         sup = (l["partner_id"][1] if l.get("partner_id") else "?").split(", ")[0]
         po = l["order_id"][1] if l.get("order_id") else ""
         groups.setdefault((dp or date.max, sup, po, proj["id"]), []).append(l["name"] or "")
