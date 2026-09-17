@@ -382,16 +382,6 @@ def get_tasks(_uid, _models, project_ids, start_date, end_date):
     {'fields': fields_to_fetch}
 )
 
-    all_stage_ids = list({t['stage_id'][0] for t in tasks if t.get('stage_id')})
-    closed_stages = set()
-    if all_stage_ids:
-        stages = models.execute_kw(DB, uid, PASSWORD, 'project.task.type', 'read',
-            [all_stage_ids], {'fields': ['id', 'name']})
-        name_done = {'done', 'terminé', 'terminée', 'fini', 'finie', 'closed', 'annulé', 'cancelled'}
-        for s in stages:
-            if s.get('is_closed') or s.get('name', '').lower().strip() in name_done:
-                closed_stages.add(s['id'])
-
     for t in tasks:
         # date_deadline
         raw = t['date_deadline']
@@ -413,10 +403,10 @@ def get_tasks(_uid, _models, project_ids, start_date, end_date):
         if t['date_start'] > t['date_deadline']:
             t['date_start'] = t['date_deadline']
 
+        # Même règle que le planning de la semaine : seul l'état de la tâche compte
+        # (pas le nom de l'étape), pour avoir les mêmes couleurs partout.
         state = str(t.get('state') or '').lower()
-        stage_id = t['stage_id'][0] if t.get('stage_id') else None
-        t['is_done'] = (any(kw in state for kw in ('done', 'cancel', 'termi', 'close'))
-                        or stage_id in closed_stages)
+        t['is_done'] = any(kw in state for kw in ('done', 'cancel', 'termi', 'close'))
     return tasks
 
 
