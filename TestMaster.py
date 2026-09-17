@@ -104,7 +104,7 @@ def project_label(p):
 
 
 # Libellés courts pour les Gantt et les vignettes Purchases
-LABEL_CLIENT_MAX = 8
+LABEL_CLIENT_MAX = 7
 GANTT_DESC_MAX = 25       # 20 + 5
 PURCHASE_DESC_MAX = 30    # 25 + 5
 
@@ -729,7 +729,7 @@ COLOR_MAP_DONE = {
     "Soudure": "#0d3a6e", "Peinture": "#8a7a00", "Assemblage": "#1a4a1e",
     "Câblage": "#3d0a5a", "Test": "#7a4400", "Montage": "#6b0f0f",
     "Mise en service": "#7a1040", "Réception": "#2e1f18",
-    "Transport": "#004a52", "Étude": "#0f5a4e", "Autres": "#3a3a3a"
+    "Transport": "#004a52", "Étude": "#1f8d77", "Autres": "#3a3a3a"
 }
 
 
