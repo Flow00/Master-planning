@@ -104,7 +104,7 @@ def project_label(p):
 
 
 # Libellés courts pour les Gantt et les vignettes Purchases
-LABEL_CLIENT_MAX = 12
+LABEL_CLIENT_MAX = 8
 GANTT_DESC_MAX = 25       # 20 + 5
 PURCHASE_DESC_MAX = 30    # 25 + 5
 
