@@ -103,6 +103,18 @@ def project_label(p):
     return f"{p.get('company', 'N/A')} - {short_desc(clean_description_from_display_name(display), 20)}"
 
 
+# Libellés courts pour les Gantt et les vignettes Purchases
+LABEL_CLIENT_MAX = 12
+GANTT_DESC_MAX = 25       # 20 + 5
+PURCHASE_DESC_MAX = 30    # 25 + 5
+
+
+def gantt_label(p):
+    display = p.get("display_name") or p.get("name") or "Projet"
+    return (f"{short_desc(p.get('company', 'N/A'), LABEL_CLIENT_MAX)} - "
+            f"{short_desc(clean_description_from_display_name(display), GANTT_DESC_MAX)}")
+
+
 def fmt_eur(val):
     return f"{val:,.0f} EUR".replace(",", " ")
 
@@ -1464,7 +1476,7 @@ def render_zone_gantt_atelier(uid, models, settings, projects, tasks, monday, we
     # Libellés uniques (évite que 2 projets au libellé identique fusionnent sur 1 ligne)
     labels, seen = {}, {}
     for p in projects:
-        lbl = project_label(p)
+        lbl = gantt_label(p)
         seen[lbl] = seen.get(lbl, 0) + 1
         labels[p["id"]] = lbl if seen[lbl] == 1 else f"{lbl} ({seen[lbl]})"
     order = [labels[p["id"]] for p in projects]
@@ -1975,7 +1987,7 @@ def main():
         # Libellé d'affichage : orange si pas de date de fin projet dans Odoo.
         # Plotly accepte du HTML dans les ticktext (<span style="color:..">).
         def _proj_display_label(proj):
-            base = project_label(proj)
+            base = gantt_label(proj)
             if proj.get("date_end") is None:
                 return f"<span style='color:#FFA000'>{base}</span>"
             return base
@@ -2222,8 +2234,8 @@ def main():
                     is_red    = sm["grey"] > 0
                     is_orange = (not is_red) and sm["orange"] > 0
                     tc        = "red" if is_red else "#FFA000" if is_orange else "white"
-                    btn_label = (f"{p['company']}\n "
-                                 f"{short_desc(clean_description_from_display_name(p['display_name']), 25)}")
+                    btn_label = (f"{short_desc(p['company'], LABEL_CLIENT_MAX)}\n "
+                                 f"{short_desc(clean_description_from_display_name(p['display_name']), PURCHASE_DESC_MAX)}")
 
                     if is_orange:
                         # Wrapper pour appliquer le CSS orange via la classe st-key-*
