@@ -1800,8 +1800,39 @@ def render_zone_receptions(uid, models, settings, projects):
     today = date.today()
     proj_by_id = {p["id"]: p for p in projects}
     out, last_sep = [], None
+
+    # ── Retards : UNE ligne par fournisseur (au lieu d'une ligne par réception) ──
+    late = {}   # fournisseur -> {"n", "oldest", "projets", "detail"}
+    for (dp, sup, po, pid), descs in groups.items():
+        if dp == date.max or dp >= today:
+            continue
+        g = late.setdefault(sup, {"n": 0, "oldest": dp, "projets": set(), "detail": []})
+        g["n"] += 1
+        g["oldest"] = min(g["oldest"], dp)
+        g["projets"].add(pid)
+        g["detail"].append(f"{dp:%d/%m} · {po} · {project_label(proj_by_id[pid])}")
+    if late:
+        n_late = sum(g["n"] for g in late.values())
+        out.append(f"<div class='rc-sep'>En retard ({n_late})</div>")
+        # le plus ancien retard en premier
+        for sup, g in sorted(late.items(), key=lambda kv: (kv[1]["oldest"], kv[0])):
+            o = g["oldest"]
+            dtxt = f"{o:%d/%m}<small>{JOURS_FR[o.weekday()]}</small>"
+            n_p = len(g["projets"])
+            info = (f"{g['n']} réception{'s' if g['n'] > 1 else ''} en retard · "
+                    f"plus ancienne le {o:%d/%m} · {n_p} projet{'s' if n_p > 1 else ''}")
+            tip = chr(10).join(sorted(g["detail"]))
+            out.append(f"<div class='rc-row' title='{_esc(tip)}'>"
+                       f"<div class='rc-date rc-late'>{dtxt}</div>"
+                       f"<div><div class='rc-sup'>{_esc(sup)}</div>"
+                       f"<div class='rc-info'>{_esc(info)}</div></div></div>")
+        last_sep = "En retard"
+
+    # ── À venir / sans date : détail comme avant ──
     for (dp, sup, po, pid), descs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-        sep = "Sans date" if dp == date.max else ("En retard" if dp < today else "À venir")
+        if dp != date.max and dp < today:
+            continue   # déjà résumé dans le bloc "En retard"
+        sep = "Sans date" if dp == date.max else "À venir"
         if sep != last_sep:
             out.append(f"<div class='rc-sep'>{sep}</div>")
             last_sep = sep
