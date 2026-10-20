@@ -996,13 +996,22 @@ _PURCHASE_KEYS = ("orange", "grey", "white", "green", "blue")
 
 @st.fragment
 def _purchases_fragment(purchase_data, projects_all, GLOBAL_PROJECT_ID):
+    # Filtre projet global d'abord : la liste des acheteurs ne doit contenir
+    # que ceux présents dans les achats des projets affichés.
+    if GLOBAL_PROJECT_ID is not None:
+        projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
+
     # ── Titre + filtre acheteur sur la même ligne ──
-    _all_buyers = sorted({l["Buyer"] for _, lines in purchase_data.values() for l in lines},
+    _all_buyers = sorted({l["Buyer"]
+                          for p in projects_all
+                          for l in purchase_data.get(p["id"], ({}, []))[1]},
                          key=str.lower)
     _pt1, _pt2 = st.columns([4, 1.5])
     with _pt1:
         st.markdown("### Purchases par projet")
     with _pt2:
+        if st.session_state.get("purchase_buyer_filter") not in (["Tous les acheteurs"] + _all_buyers):
+            st.session_state["purchase_buyer_filter"] = "Tous les acheteurs"
         buyer = st.selectbox("Acheteur", ["Tous les acheteurs"] + _all_buyers,
                              key="purchase_buyer_filter", label_visibility="collapsed")
 
@@ -1021,11 +1030,6 @@ def _purchases_fragment(purchase_data, projects_all, GLOBAL_PROJECT_ID):
             filtered[pid] = (counts, bl)
         purchase_data = filtered
         projects_all = [p for p in projects_all if p["id"] in purchase_data]
-
-    # Filtre projet global : isoler ce projet uniquement (s'il fait partie
-    # des projets actifs ; sinon on respecte le filtre habituel).
-    if GLOBAL_PROJECT_ID is not None:
-        projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
 
     # Tri : rouges (grey>0) d'abord, oranges (orange>0 sans grey) ensuite,
     # puis les autres.
