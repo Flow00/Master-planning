@@ -101,6 +101,12 @@ def fmt_eur(val):
     return f"{val:,.0f} EUR".replace(",", " ")
 
 
+def _mois_fr(d):
+    mois = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet",
+            "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
+    return f"{mois[d.month - 1]} {d.year}"
+
+
 def generate_margin_report_pdf(rows_selected, period_label):
     """rows_selected: liste de dicts avec _code, Client, CA, Dépenses, Marge_PCT.
     Retourne les bytes du PDF (pour st.download_button)."""
@@ -1295,19 +1301,6 @@ def main():
                   and analytics[p["id"]]["ca_total"] > 0
                   and abs(analytics[p["id"]]["a_facturer"]) > 0.01]
 
-        # Liste des projets sélectionnables pour le rapport PDF mensuel
-        selection_rows = []
-        for p in actifs:
-            a = analytics[p["id"]]
-            selection_rows.append({
-                "_id": p["id"],
-                "_code": extract_project_code(p["display_name"]),
-                "Client": p["company"],
-                "CA": a["ca_total"],
-                "Dépenses": a["depenses_all"],
-                "Marge_PCT": a["marge_pct"],
-            })
-
         s_ca_total  = sum(analytics[p["id"]]["ca_total"]   for p in actifs)
         s_a_fac     = sum(analytics[p["id"]]["a_facturer"] for p in actifs)
         ratio_fac   = (s_a_fac / s_ca_total * 100) if s_ca_total > 0 else 0.0
@@ -1316,10 +1309,13 @@ def main():
                     "Statistiques générales (projets en cours, tous millésimes)</div>",
                     unsafe_allow_html=True)
 
-        if "report_selector_open" not in st.session_state:
-            st.session_state["report_selector_open"] = False
         if "report_selected_ids" not in st.session_state:
             st.session_state["report_selected_ids"] = set()
+
+        # Projets cochés dans le tableau "Détail par projet" (hors "compte ≠")
+        _proj_by_id = {p["id"]: p for p in projects_ana}
+        _sel_ids = [i for i in st.session_state["report_selected_ids"]
+                    if i in _proj_by_id and analytics.get(i) and i not in mismatch_ids]
 
         m1, m2, m3, m4 = st.columns([1, 1, 1, 0.6])
         m1.metric("Ventes en cours", fmt_eur(s_ca_total),
@@ -1330,47 +1326,30 @@ def main():
                   help="À facturer / CA total, projets non clôturés")
         with m4:
             st.write("")  # alignement vertical avec les metrics
-            if st.button("📄 Rapport", use_container_width=True):
-                st.session_state["report_selector_open"] = not st.session_state["report_selector_open"]
-
-        if st.session_state["report_selector_open"]:
-            with st.container(border=True):
-                st.markdown("**Sélectionnez les projets pour lesquels vous souhaitez un rapport**")
-                _sel_df = pd.DataFrame(selection_rows)
-                _sel_df.insert(0, "Sélection", _sel_df["_id"].isin(st.session_state["report_selected_ids"]))
-                _sel_df = _sel_df.rename(columns={"_code": "N° Projet"})
-
-                edited = st.data_editor(
-                    _sel_df,
-                    column_order=("Sélection", "N° Projet", "Client"),
-                    column_config={"Sélection": st.column_config.CheckboxColumn()},
-                    disabled=["N° Projet", "Client"],
-                    hide_index=True,
+            _rep_clicked = st.button(
+                f"📄 Rapport ({len(_sel_ids)})", use_container_width=True,
+                type="primary" if _sel_ids else "secondary",
+                disabled=not _sel_ids,
+                help="Coche des projets dans le tableau ci-dessous puis clique ici")
+            if _rep_clicked:
+                selected = []
+                for i in _sel_ids:
+                    p, a = _proj_by_id[i], analytics[i]
+                    selected.append({
+                        "_code":     extract_project_code(p["display_name"])
+                                     or short_desc(clean_description_from_display_name(p["display_name"]), 20),
+                        "Client":    p["company"],
+                        "CA":        a["ca_total"],
+                        "Dépenses":  a["depenses_all"],
+                        "Marge_PCT": a["marge_pct"],
+                    })
+                st.download_button(
+                    "⬇️ Télécharger le PDF",
+                    data=generate_margin_report_pdf(selected, _mois_fr(datetime.now())),
+                    file_name=f"rapport_marge_{datetime.now().strftime('%Y-%m')}.pdf",
+                    mime="application/pdf",
                     use_container_width=True,
-                    key="report_project_editor",
                 )
-                st.session_state["report_selected_ids"] = set(
-                    edited.loc[edited["Sélection"], "_id"].tolist()
-                )
-
-                n_sel = len(st.session_state["report_selected_ids"])
-                c_gen, c_count = st.columns([1, 3])
-                with c_gen:
-                    gen_clicked = st.button("🧾 Générer rapport PDF", type="primary",
-                                             disabled=(n_sel == 0))
-                with c_count:
-                    st.caption(f"{n_sel} projet(s) sélectionné(s)")
-
-                if gen_clicked:
-                    selected = [r for r in selection_rows if r["_id"] in st.session_state["report_selected_ids"]]
-                    period_label = datetime.now().strftime("%B %Y").capitalize()
-                    pdf_bytes = generate_margin_report_pdf(selected, period_label)
-                    st.download_button(
-                        "⬇️ Télécharger le PDF",
-                        data=pdf_bytes,
-                        file_name=f"rapport_marge_{datetime.now().strftime('%Y-%m')}.pdf",
-                        mime="application/pdf",
-                    )
 
         st.markdown("---")
 
@@ -1397,6 +1376,8 @@ def main():
                 continue
             mm = p["id"] in mismatch_ids
             rows.append({
+                "_id":        p["id"],
+                "_code":      extract_project_code(p["display_name"]),
                 "_closed":    p.get("is_closed", False),
                 "_mismatch":  mm,
                 "Projet":     short_desc(clean_description_from_display_name(p["display_name"]), 45),
@@ -1423,66 +1404,70 @@ def main():
             # Tri par marge croissante ; les mismatchs (NaN) tout en bas.
             df_ana = df_ana.sort_values("Marge_PCT", ascending=True, na_position="last")
 
-            # Colonnes (sans Marge EUR)
-            cd = "2fr 1.5fr 100px 110px 100px 110px 80px"
-            hdr = f"""<div style="display:grid;grid-template-columns:{cd};column-gap:10px;
-                padding:6px 12px;font-weight:bold;font-size:12px;color:#aaa;
-                border-bottom:2px solid #555;position:sticky;top:0;background:#0e1117;z-index:10;">
-                <div>Projet</div><div>Client</div>
-                <div style="text-align:right;">CA Total</div>
-                <div style="text-align:right;">Dépenses</div>
-                <div style="text-align:right;">Facturé</div>
-                <div style="text-align:right;">À facturer</div>
-                <div style="text-align:right;">Marge %</div>
-            </div>"""
+        if rows:
+            # Tableau avec une case à cocher par projet : cocher ici, puis
+            # cliquer sur "📄 Rapport" en haut pour générer le PDF.
+            _ed = df_ana.copy()
+            _ed.insert(0, "Sélection", _ed["_id"].isin(st.session_state["report_selected_ids"]))
 
-            body = ""
-            for _, row in df_ana.iterrows():
-                cl   = row["_closed"]
-                mm   = row.get("_mismatch", False)
-                bg   = "#0d2a4a" if cl else "rgba(255,255,255,0.03)"
-                bdr  = "1px solid #1a4a7a" if cl else "1px solid #2a2a2a"
-                # Couleurs marge/à-facturer : neutres si mismatch (tirets)
-                if mm:
-                    mc, afc = "#777", "#777"
-                else:
-                    mc  = "#e53935" if row["Marge_PCT"] < 0 else "#43a047" if row["Marge_PCT"] >= 20 else "#FB8C00"
-                    afc = "#e53935" if row["A_fac"] < 0 else "#00ACC1"
-                bdg = ""
-                if cl:
-                    bdg += (" <span style='font-size:9px;background:#1565C0;color:white;"
-                            "padding:1px 4px;border-radius:3px;'>Clôturé</span>")
-                if mm:
-                    bdg += (" <span style='font-size:9px;background:#757575;color:white;"
-                            "padding:1px 4px;border-radius:3px;' title='Compte analytique d un autre projet'>"
-                            "compte ≠</span>")
+            def _etat(r):
+                if r["_mismatch"]:
+                    return "≠ compte"
+                if r["Marge_PCT"] < 0:
+                    return "🔴"
+                if r["Marge_PCT"] < 20:
+                    return "🟠"
+                return "🟢"
+            _ed["État"] = _ed.apply(_etat, axis=1)
+            _ed["Projet"] = _ed.apply(
+                lambda r: ("🔵 " if r["_closed"] else "") + r["Projet"], axis=1)
+            # Valeurs masquées (vides) pour les projets "compte ≠", comme avant
+            for c in ("CA", "Dépenses", "Facturé", "A_fac"):
+                _ed.loc[_ed["_mismatch"], c] = None
 
-                def fe(v): return f"{v:,.0f}".replace(",", " ") + " EUR"
-                def fp(v): return f"{v:.1f} %"
-                # Si mismatch : tirets partout sur les valeurs numériques
-                ca_s   = "—" if mm else fe(row['CA'])
-                dep_s  = "—" if mm else fe(row['Dépenses'])
-                fac_s  = "—" if mm else fe(row['Facturé'])
-                afac_s = "—" if mm else fe(row['A_fac'])
-                mpct_s = "—" if mm else fp(row['Marge_PCT'])
+            edited = st.data_editor(
+                _ed,
+                column_order=("Sélection", "Projet", "Client", "CA", "Dépenses",
+                              "Facturé", "A_fac", "Marge_PCT", "État"),
+                column_config={
+                    "Sélection": st.column_config.CheckboxColumn("📄", width="small",
+                                     help="Inclure dans le rapport PDF"),
+                    "Projet":    st.column_config.TextColumn("Projet", width="large"),
+                    "Client":    st.column_config.TextColumn("Client", width="medium"),
+                    "CA":        st.column_config.NumberColumn("CA Total", format="%.0f EUR"),
+                    "Dépenses":  st.column_config.NumberColumn("Dépenses", format="%.0f EUR"),
+                    "Facturé":   st.column_config.NumberColumn("Facturé", format="%.0f EUR"),
+                    "A_fac":     st.column_config.NumberColumn("À facturer", format="%.0f EUR"),
+                    "Marge_PCT": st.column_config.NumberColumn("Marge %", format="%.1f %%"),
+                    "État":      st.column_config.TextColumn("", width="small"),
+                },
+                disabled=["Projet", "Client", "CA", "Dépenses", "Facturé",
+                          "A_fac", "Marge_PCT", "État"],
+                hide_index=True,
+                use_container_width=True,
+                height=420,
+                key="ana_detail_editor",
+            )
 
-                body += f"""<div style="display:grid;grid-template-columns:{cd};column-gap:10px;
-                    padding:6px 12px;font-size:13px;background:{bg};border-bottom:{bdr};
-                    align-items:center;min-height:32px;">
-                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                        {row['Projet']}{bdg}</div>
-                    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc;">
-                        {row['Client']}</div>
-                    <div style="text-align:right;">{ca_s}</div>
-                    <div style="text-align:right;">{dep_s}</div>
-                    <div style="text-align:right;">{fac_s}</div>
-                    <div style="text-align:right;color:{afc};font-weight:600;">{afac_s}</div>
-                    <div style="text-align:right;color:{mc};">{mpct_s}</div>
-                </div>"""
+            # Mémorise la sélection (garde aussi les projets masqués par la recherche
+            # ou par le toggle "Projets clôturés")
+            _visible_ids = set(edited["_id"].tolist())
+            _new_sel = (st.session_state["report_selected_ids"] - _visible_ids) | set(
+                edited.loc[edited["Sélection"], "_id"].tolist())
+            if _new_sel != st.session_state["report_selected_ids"]:
+                st.session_state["report_selected_ids"] = _new_sel
+                st.rerun()  # met à jour le compteur du bouton "📄 Rapport"
 
-            st.markdown(f"""<div style="border:1px solid #333;border-radius:6px;overflow:hidden;
-                max-height:420px;overflow-y:auto;background:#0e1117;">
-                {hdr}<div>{body}</div></div>""", unsafe_allow_html=True)
+            _c1, _c2 = st.columns([4, 1])
+            with _c1:
+                st.caption("🔴 marge < 0 · 🟠 0–20 % · 🟢 ≥ 20 % · 🔵 clôturé · "
+                           "≠ compte = compte analytique d'un autre projet (exclu du rapport)")
+            with _c2:
+                if st.session_state["report_selected_ids"]:
+                    if st.button("Tout décocher", use_container_width=True, key="ana_clear_sel"):
+                        st.session_state["report_selected_ids"] = set()
+                        st.session_state.pop("ana_detail_editor", None)
+                        st.rerun()
 
     # ── FOOTER ──
     st.markdown("""
