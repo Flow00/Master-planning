@@ -7,3 +7,4 @@ plotly
 streamlit-autorefresh
 streamlit_plotly_events
 cryptography
+reportlab
