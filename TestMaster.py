@@ -525,7 +525,7 @@ def get_purchase_for_project(project, po_lines, policy_map, buyer_map, po_name_m
             "Buyer": buyer_map.get(l["order_id"][0], "Unknown"),
             "Description": short_desc(l["name"], 50),
             "Ordered": qty_o, "Received": qty_r, "Planned Date": dp,
-            "Color": color, "Rank": rank,
+            "Color": color, "Rank": rank, "Key": key,
         })
 
     formatted.sort(key=lambda x: x["Rank"])
@@ -808,6 +808,327 @@ def map_tasks_to_grid(projects, tasks, weeks):
                 detailed.setdefault(key, []).append(t)
                 break
     return grid, detailed
+
+
+
+# ============================================================
+# ONGLET ANALYTIQUE (fragment : rerun local, pas toute l'app)
+# ============================================================
+
+def _ana_toggle_selection(editor_key, ids_key):
+    """Callback du tableau : applique les cases cochées/décochées à la sélection
+    AVANT le rerun, pour que le bouton '📄 Rapport' affiche tout de suite le bon nombre."""
+    ids = st.session_state.get(ids_key, [])
+    sel = set(st.session_state["report_selected_ids"])
+    for idx, change in st.session_state[editor_key]["edited_rows"].items():
+        if "Sélection" in change and int(idx) < len(ids):
+            pid = ids[int(idx)]
+            if change["Sélection"]:
+                sel.add(pid)
+            else:
+                sel.discard(pid)
+    st.session_state["report_selected_ids"] = sel
+
+
+def _ana_clear_selection():
+    st.session_state["report_selected_ids"] = set()
+    st.session_state["ana_editor_nonce"] = st.session_state.get("ana_editor_nonce", 0) + 1
+
+
+@st.fragment
+def _analytique_fragment(analytics, projects_ana, actifs, mismatch_ids, GLOBAL_PROJECT_ID):
+    if "report_selected_ids" not in st.session_state:
+        st.session_state["report_selected_ids"] = set()
+    if "ana_editor_nonce" not in st.session_state:
+        st.session_state["ana_editor_nonce"] = 0
+
+    s_ca_total = sum(analytics[p["id"]]["ca_total"] for p in actifs)
+    s_a_fac    = sum(analytics[p["id"]]["a_facturer"] for p in actifs)
+    ratio_fac  = (s_a_fac / s_ca_total * 100) if s_ca_total > 0 else 0.0
+
+    st.markdown("<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
+                "Statistiques générales (projets en cours, tous millésimes)</div>",
+                unsafe_allow_html=True)
+
+    # Projets cochés dans le tableau (hors "compte ≠")
+    _proj_by_id = {p["id"]: p for p in projects_ana}
+    _sel_ids = [i for i in st.session_state["report_selected_ids"]
+                if i in _proj_by_id and analytics.get(i) and i not in mismatch_ids]
+
+    m1, m2, m3, m4 = st.columns([1, 1, 1, 0.6])
+    m1.metric("Ventes en cours", fmt_eur(s_ca_total),
+              help="CA total des projets non clôturés")
+    m2.metric("À facturer en cours", fmt_eur(s_a_fac),
+              help="Somme à facturer des projets non clôturés")
+    m3.metric("Ratio À facturer / CA", f"{ratio_fac:.1f} %",
+              help="À facturer / CA total, projets non clôturés")
+    with m4:
+        st.write("")  # alignement vertical avec les metrics
+        _rep_clicked = st.button(
+            f"📄 Rapport ({len(_sel_ids)})", use_container_width=True,
+            type="primary" if _sel_ids else "secondary",
+            disabled=not _sel_ids,
+            help="Coche des projets dans le tableau ci-dessous puis clique ici")
+        if _rep_clicked:
+            selected = []
+            for i in _sel_ids:
+                p, a = _proj_by_id[i], analytics[i]
+                selected.append({
+                    "_code":     extract_project_code(p["display_name"])
+                                 or short_desc(clean_description_from_display_name(p["display_name"]), 20),
+                    "Client":    p["company"],
+                    "CA":        a["ca_total"],
+                    "Dépenses":  a["depenses_all"],
+                    "Marge_PCT": a["marge_pct"],
+                })
+            st.download_button(
+                "⬇️ Télécharger le PDF",
+                data=generate_margin_report_pdf(selected, _mois_fr(datetime.now())),
+                file_name=f"rapport_marge_{datetime.now().strftime('%Y-%m')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+    st.markdown("---")
+
+    # ── Titre + toggle clôturés/en cours sur la même ligne ──
+    _dt1, _dt2 = st.columns([4, 1])
+    with _dt1:
+        st.markdown("#### Détail par projet")
+    with _dt2:
+        show_closed = st.toggle("Projets clôturés", value=False, key="ana_show_closed")
+
+    # Filtre projet global : appliqué uniquement en mode "en cours".
+    if show_closed:
+        projects_filtered = [p for p in projects_ana if p.get("is_closed")]
+    else:
+        projects_filtered = [p for p in projects_ana if not p.get("is_closed")]
+        if GLOBAL_PROJECT_ID is not None:
+            projects_filtered = [p for p in projects_filtered if p["id"] == GLOBAL_PROJECT_ID]
+
+    rows = []
+    for p in projects_filtered:
+        a = analytics.get(p["id"])
+        if a is None:
+            continue
+        mm = p["id"] in mismatch_ids
+        rows.append({
+            "_id":       p["id"],
+            "_closed":   p.get("is_closed", False),
+            "_mismatch": mm,
+            "Projet":    ("🔵 " if p.get("is_closed") else "")
+                         + short_desc(clean_description_from_display_name(p["display_name"]), 45),
+            "Client":    p["company"],
+            "CA":        None if mm else a["ca_total"],
+            "Dépenses":  None if mm else a["depenses_all"],
+            "Facturé":   None if mm else a["facture_all"],
+            "A_fac":     None if mm else a["a_facturer"],
+            "Marge_PCT": float("nan") if mm else a["marge_pct"],
+            "État":      "≠ compte" if mm else ("🔴" if a["marge_pct"] < 0
+                          else "🟠" if a["marge_pct"] < 20 else "🟢"),
+        })
+
+    if not rows:
+        st.info("Aucune donnée.")
+        return
+
+    df_ana = pd.DataFrame(rows)
+    search = st.text_input("Recherche", "", placeholder="Projet ou client...", key="ana_search")
+    if search:
+        s = search.lower()
+        df_ana = df_ana[df_ana["Projet"].str.lower().str.contains(s, regex=False)
+                        | df_ana["Client"].str.lower().str.contains(s, regex=False)]
+
+    # Tri par marge croissante ; les mismatchs (NaN) tout en bas.
+    df_ana = df_ana.sort_values("Marge_PCT", ascending=True, na_position="last").reset_index(drop=True)
+    df_ana.insert(0, "Sélection", df_ana["_id"].isin(st.session_state["report_selected_ids"]))
+
+    # La clé du tableau dépend de la vue (recherche / clôturés) : quand la vue
+    # change, le tableau repart propre et les lignes ne se mélangent pas.
+    _view = f"{int(show_closed)}|{search}|{GLOBAL_PROJECT_ID}|{st.session_state['ana_editor_nonce']}"
+    editor_key = f"ana_editor_{abs(hash(_view))}"
+    ids_key = editor_key + "_ids"
+    st.session_state[ids_key] = df_ana["_id"].tolist()
+
+    st.data_editor(
+        df_ana,
+        column_order=("Sélection", "Projet", "Client", "CA", "Dépenses",
+                      "Facturé", "A_fac", "Marge_PCT", "État"),
+        column_config={
+            "Sélection": st.column_config.CheckboxColumn("📄", width="small",
+                             help="Inclure dans le rapport PDF"),
+            "Projet":    st.column_config.TextColumn("Projet", width="large"),
+            "Client":    st.column_config.TextColumn("Client", width="medium"),
+            "CA":        st.column_config.NumberColumn("CA Total", format="%.0f EUR"),
+            "Dépenses":  st.column_config.NumberColumn("Dépenses", format="%.0f EUR"),
+            "Facturé":   st.column_config.NumberColumn("Facturé", format="%.0f EUR"),
+            "A_fac":     st.column_config.NumberColumn("À facturer", format="%.0f EUR"),
+            "Marge_PCT": st.column_config.NumberColumn("Marge %", format="%.1f %%"),
+            "État":      st.column_config.TextColumn("", width="small"),
+        },
+        disabled=["Projet", "Client", "CA", "Dépenses", "Facturé",
+                  "A_fac", "Marge_PCT", "État"],
+        hide_index=True,
+        use_container_width=True,
+        height=420,
+        key=editor_key,
+        on_change=_ana_toggle_selection,
+        args=(editor_key, ids_key),
+    )
+
+    _c1, _c2 = st.columns([4, 1])
+    with _c1:
+        st.caption("🔴 marge < 0 · 🟠 0–20 % · 🟢 ≥ 20 % · 🔵 clôturé · "
+                   "≠ compte = compte analytique d'un autre projet (exclu du rapport)")
+    with _c2:
+        if st.session_state["report_selected_ids"]:
+            st.button("Tout décocher", use_container_width=True, key="ana_clear_sel",
+                      on_click=_ana_clear_selection)
+
+
+
+# ============================================================
+# ONGLET PURCHASES (fragment : rerun local, pas toute l'app)
+# ============================================================
+
+_PURCHASE_KEYS = ("orange", "grey", "white", "green", "blue")
+
+
+@st.fragment
+def _purchases_fragment(purchase_data, projects_all, GLOBAL_PROJECT_ID):
+    # ── Titre + filtre acheteur sur la même ligne ──
+    _all_buyers = sorted({l["Buyer"] for _, lines in purchase_data.values() for l in lines},
+                         key=str.lower)
+    _pt1, _pt2 = st.columns([4, 1.5])
+    with _pt1:
+        st.markdown("### Purchases par projet")
+    with _pt2:
+        buyer = st.selectbox("Acheteur", ["Tous les acheteurs"] + _all_buyers,
+                             key="purchase_buyer_filter", label_visibility="collapsed")
+
+    # Filtre acheteur : on ne garde que ses lignes et on recompte les vignettes.
+    # Les projets sans aucune ligne de cet acheteur disparaissent.
+    if buyer != "Tous les acheteurs":
+        filtered = {}
+        for pid, (_, lines) in purchase_data.items():
+            bl = [l for l in lines if l["Buyer"] == buyer]
+            if not bl:
+                continue
+            counts = {k: 0 for k in _PURCHASE_KEYS}
+            for l in bl:
+                counts[l["Key"]] += 1
+            counts["total"] = len(bl)
+            filtered[pid] = (counts, bl)
+        purchase_data = filtered
+        projects_all = [p for p in projects_all if p["id"] in purchase_data]
+
+    # Filtre projet global : isoler ce projet uniquement (s'il fait partie
+    # des projets actifs ; sinon on respecte le filtre habituel).
+    if GLOBAL_PROJECT_ID is not None:
+        projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
+
+    # Tri : rouges (grey>0) d'abord, oranges (orange>0 sans grey) ensuite,
+    # puis les autres.
+    def _sort_key(p):
+        sm, _ = purchase_data[p["id"]]
+        if sm["grey"] > 0:
+            return (0, -sm["grey"] - sm["orange"])
+        if sm["orange"] > 0:
+            return (1, -sm["orange"])
+        return (2, 0)
+    projects_all = sorted(projects_all, key=_sort_key)
+
+    # CSS pour colorer en orange les boutons des vignettes wrappées
+    # avec st.container(key="orange_btn_*"). Streamlit injecte la classe
+    # `.st-key-orange_btn_<id>` autour du container.
+    st.markdown("""
+    <style>
+    [class*="st-key-orange_btn_"] button {
+        background-color: #FFA000 !important;
+        color: white !important;
+        border: 1px solid #FFA000 !important;
+    }
+    [class*="st-key-orange_btn_"] button:hover {
+        background-color: #FF8C00 !important;
+        border-color: #FF8C00 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    for i in range(0, len(projects_all), 6):
+        cols = st.columns(6)
+        for col, p in zip(cols, projects_all[i:i+6]):
+            with col:
+                sm, _ = purchase_data[p['id']]
+                tot   = max(sm["total"], 1)
+                is_red    = sm["grey"] > 0
+                is_orange = (not is_red) and sm["orange"] > 0
+                tc        = "red" if is_red else "#FFA000" if is_orange else "white"
+                btn_label = (f"{p['company']}\n "
+                             f"{short_desc(clean_description_from_display_name(p['display_name']), 25)}")
+
+                if is_orange:
+                    # Wrapper pour appliquer le CSS orange via la classe st-key-*
+                    with st.container(key=f"orange_btn_{p['id']}"):
+                        clicked = st.button(btn_label, key=f"proj_btn_{p['id']}")
+                else:
+                    clicked = st.button(
+                        btn_label,
+                        key=f"proj_btn_{p['id']}",
+                        type="primary" if is_red else "secondary",
+                    )
+                if clicked:
+                    st.session_state["selected_purchase_project_id"] = p['id']
+
+                st.markdown(f"""
+                    <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
+                        display:flex;border:1px solid #FFFFFF;margin-top:4px;">
+                        <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
+                        <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
+                        <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
+                        <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
+                        <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
+                    </div>
+                    <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
+                        {sm['green']} / {sm['total']} lignes
+                    </div>""",
+                    unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.subheader("Détail lignes d'achat")
+
+    # Si filtre projet global actif → afficher d'office le détail de ce projet
+    if GLOBAL_PROJECT_ID is not None and projects_all:
+        sel_id = projects_all[0]["id"]
+    else:
+        sel_id = st.session_state.get("selected_purchase_project_id")
+
+    if sel_id is None:
+        st.info("Clique sur une vignette pour voir le détail.")
+    else:
+        p = next((p for p in projects_all if p['id'] == sel_id), None)
+        if p:
+            st.markdown(f"**{p['company']} - {p.get('name') or p['display_name']}**")
+            _, lines = purchase_data[p['id']]
+            if not lines:
+                st.info("Aucune ligne.")
+            else:
+                st.markdown(f"**{len(lines)} lignes**")
+                for row in lines:
+                    dd = row['Planned Date'].strftime("%d-%m-%Y") if row['Planned Date'] else "-"
+                    tc = "white" if row['Color'] in ("#1565C0", "#2E7D32", "#757575") else "black"
+                    st.markdown(f"""<div style="background:{row['Color']};padding:8px 12px;
+                        border-radius:4px;margin-bottom:5px;border:1px solid #555;font-size:14px;
+                        color:{tc};display:grid;
+                        grid-template-columns:90px 190px 1fr 80px 90px 110px;
+                        column-gap:12px;align-items:center;">
+                        <div><b>PO:</b> {row['PO']}</div>
+                        <div><b>Buyer:</b> {row['Buyer']}</div>
+                        <div><b>Desc:</b> {row['Description']}</div>
+                        <div><b>Ord.:</b> {row['Ordered']}</div>
+                        <div><b>Reçu:</b> {row['Received']}</div>
+                        <div><b>Date:</b> {dd}</div>
+                    </div>""", unsafe_allow_html=True)
 
 
 # ============================================================
@@ -1148,119 +1469,11 @@ def main():
 
     # ── ONGLET 2 : PURCHASES ─────────────────────────────────────
     with tab2:
-        st.markdown("### Purchases par projet")
-
         # Pré-calcul caché pour TOUS les projets actifs : le filtre projet global
         # ne déclenche plus de recalcul, juste un re-filtrage côté Python.
         purchase_data, projects_all = compute_all_purchase_data(uid, models, fm)
-
-        # Filtre projet global : isoler ce projet uniquement (s'il fait partie
-        # des projets actifs ; sinon on respecte le filtre habituel).
-        if GLOBAL_PROJECT_ID is not None:
-            projects_all = [p for p in projects_all if p["id"] == GLOBAL_PROJECT_ID]
-
-        # Tri : rouges (grey>0) d'abord, oranges (orange>0 sans grey) ensuite,
-        # puis les autres.
-        def _sort_key(p):
-            sm, _ = purchase_data[p["id"]]
-            if sm["grey"] > 0:
-                return (0, -sm["grey"] - sm["orange"])
-            if sm["orange"] > 0:
-                return (1, -sm["orange"])
-            return (2, 0)
-        projects_all = sorted(projects_all, key=_sort_key)
-
-        # CSS pour colorer en orange les boutons des vignettes wrappées
-        # avec st.container(key="orange_btn_*"). Streamlit injecte la classe
-        # `.st-key-orange_btn_<id>` autour du container.
-        st.markdown("""
-        <style>
-        [class*="st-key-orange_btn_"] button {
-            background-color: #FFA000 !important;
-            color: white !important;
-            border: 1px solid #FFA000 !important;
-        }
-        [class*="st-key-orange_btn_"] button:hover {
-            background-color: #FF8C00 !important;
-            border-color: #FF8C00 !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        for i in range(0, len(projects_all), 6):
-            cols = st.columns(6)
-            for col, p in zip(cols, projects_all[i:i+6]):
-                with col:
-                    sm, _ = purchase_data[p['id']]
-                    tot   = max(sm["total"], 1)
-                    is_red    = sm["grey"] > 0
-                    is_orange = (not is_red) and sm["orange"] > 0
-                    tc        = "red" if is_red else "#FFA000" if is_orange else "white"
-                    btn_label = (f"{p['company']}\n "
-                                 f"{short_desc(clean_description_from_display_name(p['display_name']), 25)}")
-
-                    if is_orange:
-                        # Wrapper pour appliquer le CSS orange via la classe st-key-*
-                        with st.container(key=f"orange_btn_{p['id']}"):
-                            clicked = st.button(btn_label, key=f"proj_btn_{p['id']}")
-                    else:
-                        clicked = st.button(
-                            btn_label,
-                            key=f"proj_btn_{p['id']}",
-                            type="primary" if is_red else "secondary",
-                        )
-                    if clicked:
-                        st.session_state["selected_purchase_project_id"] = p['id']
-
-                    st.markdown(f"""
-                        <div style="width:100%;height:12px;border-radius:6px;overflow:hidden;
-                            display:flex;border:1px solid #FFFFFF;margin-top:4px;">
-                            <div style="width:{100*sm['grey']//tot}%;background:#757575;"></div>
-                            <div style="width:{100*sm['orange']//tot}%;background:#FFA000;"></div>
-                            <div style="width:{100*sm['white']//tot}%;background:#FFFFFF;"></div>
-                            <div style="width:{100*sm['blue']//tot}%;background:#1565C0;"></div>
-                            <div style="width:{100*sm['green']//tot}%;background:#2E7D32;"></div>
-                        </div>
-                        <div style="text-align:right;font-size:12px;color:{tc};margin-top:2px;">
-                            {sm['green']} / {sm['total']} lignes
-                        </div>""",
-                        unsafe_allow_html=True)
-
-        st.markdown("---")
-        st.subheader("Détail lignes d'achat")
-
-        # Si filtre projet global actif → afficher d'office le détail de ce projet
-        if GLOBAL_PROJECT_ID is not None and projects_all:
-            sel_id = projects_all[0]["id"]
-        else:
-            sel_id = st.session_state.get("selected_purchase_project_id")
-
-        if sel_id is None:
-            st.info("Clique sur une vignette pour voir le détail.")
-        else:
-            p = next((p for p in projects_all if p['id'] == sel_id), None)
-            if p:
-                st.markdown(f"**{p['company']} - {p.get('name') or p['display_name']}**")
-                _, lines = purchase_data[p['id']]
-                if not lines:
-                    st.info("Aucune ligne.")
-                else:
-                    st.markdown(f"**{len(lines)} lignes**")
-                    for row in lines:
-                        dd = row['Planned Date'].strftime("%d-%m-%Y") if row['Planned Date'] else "-"
-                        tc = "white" if row['Color'] in ("#1565C0", "#2E7D32", "#757575") else "black"
-                        st.markdown(f"""<div style="background:{row['Color']};padding:8px 12px;
-                            border-radius:4px;margin-bottom:5px;border:1px solid #555;font-size:14px;
-                            color:{tc};display:grid;
-                            grid-template-columns:90px 190px 1fr 80px 90px 110px;
-                            column-gap:12px;align-items:center;">
-                            <div><b>PO:</b> {row['PO']}</div>
-                            <div><b>Buyer:</b> {row['Buyer']}</div>
-                            <div><b>Desc:</b> {row['Description']}</div>
-                            <div><b>Ord.:</b> {row['Ordered']}</div>
-                            <div><b>Reçu:</b> {row['Received']}</div>
-                            <div><b>Date:</b> {dd}</div>
-                        </div>""", unsafe_allow_html=True)
+        # Fragment : filtre acheteur / clic vignette ne relancent que cet onglet.
+        _purchases_fragment(purchase_data, projects_all, GLOBAL_PROJECT_ID)
 
     # ── ONGLET 3 : ANALYTIQUE ────────────────────────────────────
     with tab3:
@@ -1301,173 +1514,9 @@ def main():
                   and analytics[p["id"]]["ca_total"] > 0
                   and abs(analytics[p["id"]]["a_facturer"]) > 0.01]
 
-        s_ca_total  = sum(analytics[p["id"]]["ca_total"]   for p in actifs)
-        s_a_fac     = sum(analytics[p["id"]]["a_facturer"] for p in actifs)
-        ratio_fac   = (s_a_fac / s_ca_total * 100) if s_ca_total > 0 else 0.0
-
-        st.markdown("<div style='font-size:13px;color:#aaa;margin-bottom:6px;'>"
-                    "Statistiques générales (projets en cours, tous millésimes)</div>",
-                    unsafe_allow_html=True)
-
-        if "report_selected_ids" not in st.session_state:
-            st.session_state["report_selected_ids"] = set()
-
-        # Projets cochés dans le tableau "Détail par projet" (hors "compte ≠")
-        _proj_by_id = {p["id"]: p for p in projects_ana}
-        _sel_ids = [i for i in st.session_state["report_selected_ids"]
-                    if i in _proj_by_id and analytics.get(i) and i not in mismatch_ids]
-
-        m1, m2, m3, m4 = st.columns([1, 1, 1, 0.6])
-        m1.metric("Ventes en cours", fmt_eur(s_ca_total),
-                  help="CA total des projets non clôturés")
-        m2.metric("À facturer en cours", fmt_eur(s_a_fac),
-                  help="Somme à facturer des projets non clôturés")
-        m3.metric("Ratio À facturer / CA", f"{ratio_fac:.1f} %",
-                  help="À facturer / CA total, projets non clôturés")
-        with m4:
-            st.write("")  # alignement vertical avec les metrics
-            _rep_clicked = st.button(
-                f"📄 Rapport ({len(_sel_ids)})", use_container_width=True,
-                type="primary" if _sel_ids else "secondary",
-                disabled=not _sel_ids,
-                help="Coche des projets dans le tableau ci-dessous puis clique ici")
-            if _rep_clicked:
-                selected = []
-                for i in _sel_ids:
-                    p, a = _proj_by_id[i], analytics[i]
-                    selected.append({
-                        "_code":     extract_project_code(p["display_name"])
-                                     or short_desc(clean_description_from_display_name(p["display_name"]), 20),
-                        "Client":    p["company"],
-                        "CA":        a["ca_total"],
-                        "Dépenses":  a["depenses_all"],
-                        "Marge_PCT": a["marge_pct"],
-                    })
-                st.download_button(
-                    "⬇️ Télécharger le PDF",
-                    data=generate_margin_report_pdf(selected, _mois_fr(datetime.now())),
-                    file_name=f"rapport_marge_{datetime.now().strftime('%Y-%m')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-
-        st.markdown("---")
-
-        # ── Titre + toggle clôturés/en cours sur la même ligne ──
-        _dt1, _dt2 = st.columns([4, 1])
-        with _dt1:
-            st.markdown("#### Détail par projet")
-        with _dt2:
-            show_closed = st.toggle("Projets clôturés", value=False, key="ana_show_closed")
-
-        # Filtre projet global : appliqué uniquement en mode "en cours".
-        # En mode "clôturés", on bypass le filtre global (on montre tous les clôturés).
-        if show_closed:
-            projects_filtered = [p for p in projects_ana if p.get("is_closed")]
-        else:
-            projects_filtered = [p for p in projects_ana if not p.get("is_closed")]
-            if GLOBAL_PROJECT_ID is not None:
-                projects_filtered = [p for p in projects_filtered if p["id"] == GLOBAL_PROJECT_ID]
-
-        rows = []
-        for p in projects_filtered:
-            a = analytics.get(p["id"])
-            if a is None:
-                continue
-            mm = p["id"] in mismatch_ids
-            rows.append({
-                "_id":        p["id"],
-                "_code":      extract_project_code(p["display_name"]),
-                "_closed":    p.get("is_closed", False),
-                "_mismatch":  mm,
-                "Projet":     short_desc(clean_description_from_display_name(p["display_name"]), 45),
-                "Client":     p["company"],
-                "CA":         a["ca_total"],
-                "Dépenses":   a["depenses_all"],
-                "Facturé":    a["facture_all"],
-                "A_fac":      a["a_facturer"],
-                # Si mismatch, on met NaN pour que le tri par marge place ces
-                # lignes tout en bas (na_position='last') au lieu de fausser l'ordre.
-                "Marge_PCT":  float("nan") if mm else a["marge_pct"],
-            })
-
-        if not rows:
-            st.info("Aucune donnée.")
-        else:
-            df_ana = pd.DataFrame(rows)
-            search = st.text_input("Recherche", "", placeholder="Projet ou client...", key="ana_search")
-            if search:
-                s = search.lower()
-                df_ana = df_ana[df_ana["Projet"].str.lower().str.contains(s)
-                                | df_ana["Client"].str.lower().str.contains(s)]
-
-            # Tri par marge croissante ; les mismatchs (NaN) tout en bas.
-            df_ana = df_ana.sort_values("Marge_PCT", ascending=True, na_position="last")
-
-        if rows:
-            # Tableau avec une case à cocher par projet : cocher ici, puis
-            # cliquer sur "📄 Rapport" en haut pour générer le PDF.
-            _ed = df_ana.copy()
-            _ed.insert(0, "Sélection", _ed["_id"].isin(st.session_state["report_selected_ids"]))
-
-            def _etat(r):
-                if r["_mismatch"]:
-                    return "≠ compte"
-                if r["Marge_PCT"] < 0:
-                    return "🔴"
-                if r["Marge_PCT"] < 20:
-                    return "🟠"
-                return "🟢"
-            _ed["État"] = _ed.apply(_etat, axis=1)
-            _ed["Projet"] = _ed.apply(
-                lambda r: ("🔵 " if r["_closed"] else "") + r["Projet"], axis=1)
-            # Valeurs masquées (vides) pour les projets "compte ≠", comme avant
-            for c in ("CA", "Dépenses", "Facturé", "A_fac"):
-                _ed.loc[_ed["_mismatch"], c] = None
-
-            edited = st.data_editor(
-                _ed,
-                column_order=("Sélection", "Projet", "Client", "CA", "Dépenses",
-                              "Facturé", "A_fac", "Marge_PCT", "État"),
-                column_config={
-                    "Sélection": st.column_config.CheckboxColumn("📄", width="small",
-                                     help="Inclure dans le rapport PDF"),
-                    "Projet":    st.column_config.TextColumn("Projet", width="large"),
-                    "Client":    st.column_config.TextColumn("Client", width="medium"),
-                    "CA":        st.column_config.NumberColumn("CA Total", format="%.0f EUR"),
-                    "Dépenses":  st.column_config.NumberColumn("Dépenses", format="%.0f EUR"),
-                    "Facturé":   st.column_config.NumberColumn("Facturé", format="%.0f EUR"),
-                    "A_fac":     st.column_config.NumberColumn("À facturer", format="%.0f EUR"),
-                    "Marge_PCT": st.column_config.NumberColumn("Marge %", format="%.1f %%"),
-                    "État":      st.column_config.TextColumn("", width="small"),
-                },
-                disabled=["Projet", "Client", "CA", "Dépenses", "Facturé",
-                          "A_fac", "Marge_PCT", "État"],
-                hide_index=True,
-                use_container_width=True,
-                height=420,
-                key="ana_detail_editor",
-            )
-
-            # Mémorise la sélection (garde aussi les projets masqués par la recherche
-            # ou par le toggle "Projets clôturés")
-            _visible_ids = set(edited["_id"].tolist())
-            _new_sel = (st.session_state["report_selected_ids"] - _visible_ids) | set(
-                edited.loc[edited["Sélection"], "_id"].tolist())
-            if _new_sel != st.session_state["report_selected_ids"]:
-                st.session_state["report_selected_ids"] = _new_sel
-                st.rerun()  # met à jour le compteur du bouton "📄 Rapport"
-
-            _c1, _c2 = st.columns([4, 1])
-            with _c1:
-                st.caption("🔴 marge < 0 · 🟠 0–20 % · 🟢 ≥ 20 % · 🔵 clôturé · "
-                           "≠ compte = compte analytique d'un autre projet (exclu du rapport)")
-            with _c2:
-                if st.session_state["report_selected_ids"]:
-                    if st.button("Tout décocher", use_container_width=True, key="ana_clear_sel"):
-                        st.session_state["report_selected_ids"] = set()
-                        st.session_state.pop("ana_detail_editor", None)
-                        st.rerun()
+        # Tout le bas de l'onglet est un FRAGMENT : cocher une case ne relance
+        # que ce bloc (pas le Gantt ni les vignettes Purchases) → instantané.
+        _analytique_fragment(analytics, projects_ana, actifs, mismatch_ids, GLOBAL_PROJECT_ID)
 
     # ── FOOTER ──
     st.markdown("""
